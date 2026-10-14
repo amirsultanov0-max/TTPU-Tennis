@@ -2,16 +2,17 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, ReplyKeyboardRemove
 
 from bot.keyboards.matches import (
+    get_cancelled_matches_keyboard,
     get_cancel_confirmation_keyboard,
     get_completed_matches_keyboard,
-    get_match_list_keyboard,
+    get_needs_action_keyboard,
     get_upcoming_matches_keyboard,
     get_match_navigation_keyboard,
+    get_result_actions_keyboard,
     get_my_matches_keyboard,
-    get_result_navigation_keyboard,
 )
 
 from bot.states.matches import MatchResultStates
@@ -23,25 +24,18 @@ from bot.ui.messages.common import (
 )
 
 from bot.ui.messages.matches import (
-    cancel_match_confirmation_message,
-    confirmed_result_message,
     format_match_message,
+    format_upcoming_match_detail,
     format_upcoming_match_summary,
     format_match_summary,
-    match_cancelled_message,
-    match_cancelled_notification_message,
+    format_cancelled_matches_message,
     match_empty_message,
-    match_list_message,
+    needs_action_header,
+    format_needs_action_schedule,
+    format_needs_action_schedule_proposal,
+    format_needs_action_result,
+    format_needs_action_confirmation,
     my_matches_message,
-    result_session_expired_message,
-    result_submission_message,
-    score_format_error_message,
-    score_parse_error_message,
-    invalid_set_score_message,
-    invalid_match_result_message,
-    set_2_submission_message,
-    set_3_submission_message,
-    submitted_result_message,
 )
 
 
@@ -49,10 +43,13 @@ from services.matches import (
     cancel_match,
     confirm_match_result,
     get_match_by_id,
+    get_player_match_stats,
     get_matches_for_user,
+    get_pending_schedule_requests,
     submit_match_result,
 )
 from services.users import get_user_by_telegram_id
+from services.ranking import get_player_rank
 
 
 router = Router()
@@ -92,27 +89,6 @@ async def safe_edit_text(
 # ============================================================
 
 
-def format_match_status(status: str) -> str:
-    """Return a user-friendly match status."""
-
-    status_names = {
-        "awaiting_schedule": "Awaiting schedule",
-        "scheduled": "Scheduled",
-        "completed": "Completed",
-        "cancelled": "Cancelled",
-    }
-
-    return status_names.get(
-        status,
-        status.replace("_", " ").title(),
-    )
-
-
-# ============================================================
-# MATCH CATEGORIES
-# ============================================================
-
-
 def get_upcoming_matches(matches) -> list:
     """
     Return scheduled matches whose time has not passed.
@@ -140,8 +116,11 @@ def get_needs_action_matches(matches) -> list:
 
     Includes:
         - matches awaiting scheduling
-        - scheduled matches whose time has passed
-        - matches waiting for result confirmation
+        - scheduled matches whose time has passed and
+          still need a result
+
+    Schedule proposals and result confirmations are
+    handled separately by the Needs Action inbox.
     """
 
     now = datetime.now(timezone.utc)
@@ -158,13 +137,7 @@ def get_needs_action_matches(matches) -> list:
             match.status == "scheduled"
             and match.scheduled_at
             and match.scheduled_at <= now
-        ):
-            needs_action.append(match)
-            continue
-
-        if (
-            match.status == "scheduled"
-            and match.result_status == "pending_confirmation"
+            and match.result_status == "not_submitted"
         ):
             needs_action.append(match)
 
@@ -190,20 +163,6 @@ def get_cancelled_matches(matches) -> list:
         if match.status == "cancelled"
     ]
 
-
-# ============================================================
-# MATCH DISPLAY
-# ============================================================
-
-
-def format_match_text(
-    match,
-    user_id: int,
-) -> str:
-    return format_match_message(
-        match,
-        user_id,
-    )
 
 
 # ============================================================
@@ -235,8 +194,30 @@ async def my_matches_handler(
         matches
     )
 
-    needs_action = get_needs_action_matches(
+    needs_action_matches = get_needs_action_matches(
         matches
+    )
+
+    pending_schedule_requests = (
+        await get_pending_schedule_requests(user.id)
+    )
+
+    needs_action_count = len(
+        pending_schedule_requests
+    )
+
+    needs_action_count += len(
+        needs_action_matches
+    )
+
+    needs_action_count += sum(
+        1
+        for match in matches
+        if (
+            match.status == "scheduled"
+            and match.result_status == "pending_confirmation"
+            and match.result_submitted_by_id != user.id
+        )
     )
 
     completed = get_completed_matches(
@@ -247,19 +228,99 @@ async def my_matches_handler(
         matches
     )
 
+    my_matches_text = my_matches_message(
+        upcoming_count=len(upcoming),
+        needs_action_count=needs_action_count,
+        completed_count=len(completed),
+        cancelled_count=len(cancelled),
+    )
+
     await message.answer(
-        my_matches_message(
-            upcoming_count=len(upcoming),
-            needs_action_count=len(needs_action),
-            completed_count=len(completed),
-            cancelled_count=len(cancelled),
-        ),
+        my_matches_text,
         reply_markup=get_my_matches_keyboard(),
     )
 
 
+
+@router.callback_query(
+    F.data == "matches:back"
+)
+async def matches_back_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Return to the main My Matches navigation menu."""
+
+    user = await get_user_by_telegram_id(
+        callback.from_user.id
+    )
+
+    if not user:
+        await callback.answer(
+            profile_not_found_message()
+        )
+        return
+
+    matches = await get_matches_for_user(
+        user.id
+    )
+
+    upcoming = get_upcoming_matches(
+        matches
+    )
+
+    needs_action_matches = get_needs_action_matches(
+        matches
+    )
+
+    pending_schedule_requests = (
+        await get_pending_schedule_requests(user.id)
+    )
+
+    needs_action_count = len(
+        pending_schedule_requests
+    )
+
+    needs_action_count += len(
+        needs_action_matches
+    )
+
+    needs_action_count += sum(
+        1
+        for match in matches
+        if (
+            match.status == "scheduled"
+            and match.result_status == "pending_confirmation"
+            and match.result_submitted_by_id != user.id
+        )
+    )
+
+    completed = get_completed_matches(
+        matches
+    )
+
+    cancelled = get_cancelled_matches(
+        matches
+    )
+
+    my_matches_text = my_matches_message(
+        upcoming_count=len(upcoming),
+        needs_action_count=needs_action_count,
+        completed_count=len(completed),
+        cancelled_count=len(cancelled),
+    )
+
+    await safe_edit_text(
+        callback,
+        my_matches_text,
+        reply_markup=get_my_matches_keyboard(),
+    )
+
+    await callback.answer()
+
+
+
 # ============================================================
-# 🟢 UPCOMING
+# UPCOMING
 # ============================================================
 
 
@@ -377,10 +438,10 @@ def _build_upcoming_message(
     upcoming,
     user_id: int,
     start_index: int,
-) -> tuple[str, int | None, bool]:
+) -> tuple[str, int | None, bool, list]:
     """Build one page of the upcoming match timeline."""
 
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now().date()
 
     scheduled = sorted(
         (
@@ -413,6 +474,7 @@ def _build_upcoming_message(
             "\n".join(message_parts).rstrip(),
             None,
             False,
+            unscheduled,
         )
 
     page_matches, next_start, has_next = _get_upcoming_page(
@@ -420,7 +482,8 @@ def _build_upcoming_message(
         start_index,
     )
 
-    message_parts = []
+    message_parts = ["🎟️ Upcoming"]
+    message_parts.append("")
     current_date = None
 
     for match in page_matches:
@@ -462,10 +525,16 @@ def _build_upcoming_message(
 
     next_index = next_start if has_next else None
 
+    visible_matches = list(page_matches)
+
+    if not has_next:
+        visible_matches.extend(unscheduled)
+
     return (
         "\n".join(message_parts).rstrip(),
         next_index,
         has_next,
+        visible_matches,
     )
 
 
@@ -506,7 +575,12 @@ async def upcoming_matches_handler(
         await callback.answer()
         return
 
-    message, next_index, has_next = _build_upcoming_message(
+    (
+        message,
+        next_index,
+        has_next,
+        visible_matches,
+    ) = _build_upcoming_message(
         upcoming,
         user.id,
         0,
@@ -516,6 +590,7 @@ async def upcoming_matches_handler(
         callback,
         message,
         reply_markup=get_upcoming_matches_keyboard(
+            visible_matches=visible_matches,
             previous_index=None,
             next_index=next_index,
             current_index=0,
@@ -561,7 +636,12 @@ async def upcoming_matches_next_handler(
         matches
     )
 
-    message, next_page_index, has_next = _build_upcoming_message(
+    (
+        message,
+        next_page_index,
+        has_next,
+        visible_matches,
+    ) = _build_upcoming_message(
         upcoming,
         user.id,
         next_index,
@@ -585,6 +665,7 @@ async def upcoming_matches_next_handler(
         callback,
         message,
         reply_markup=get_upcoming_matches_keyboard(
+            visible_matches=visible_matches,
             previous_index=previous_index,
             next_index=next_page_index,
             current_index=next_index,
@@ -629,7 +710,12 @@ async def upcoming_matches_previous_handler(
         matches
     )
 
-    message, next_page_index, has_next = _build_upcoming_message(
+    (
+        message,
+        next_page_index,
+        has_next,
+        visible_matches,
+    ) = _build_upcoming_message(
         upcoming,
         user.id,
         previous_index,
@@ -653,6 +739,7 @@ async def upcoming_matches_previous_handler(
         callback,
         message,
         reply_markup=get_upcoming_matches_keyboard(
+            visible_matches=visible_matches,
             previous_index=earlier_index,
             next_index=next_page_index,
             current_index=previous_index,
@@ -663,7 +750,7 @@ async def upcoming_matches_previous_handler(
 
 
 # ============================================================
-# 🔴 NEEDS ACTION
+# NEEDS ACTION
 # ============================================================
 
 
@@ -673,8 +760,38 @@ async def upcoming_matches_previous_handler(
 async def needs_action_matches_handler(
     callback: CallbackQuery,
 ) -> None:
-    """Show matches that currently require user attention."""
+    """Show the user's Needs Action inbox."""
 
+    await _show_needs_action_page(
+        callback=callback,
+        page=0,
+    )
+
+
+@router.callback_query(
+    F.data.startswith("matches:needs_action:page:")
+)
+async def needs_action_page_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Show a page of Needs Action items."""
+
+    page = int(callback.data.rsplit(":", 1)[1])
+
+    if page < 0:
+        await callback.answer()
+        return
+
+    await _show_needs_action_page(
+        callback=callback,
+        page=page,
+    )
+
+
+async def _show_needs_action_page(
+    callback: CallbackQuery,
+    page: int,
+) -> None:
     user = await get_user_by_telegram_id(
         callback.from_user.id
     )
@@ -690,11 +807,72 @@ async def needs_action_matches_handler(
         user.id
     )
 
-    needs_action = get_needs_action_matches(
+    pending_schedule_requests = (
+        await get_pending_schedule_requests(user.id)
+    )
+
+    needs_action_matches = get_needs_action_matches(
         matches
     )
 
-    if not needs_action:
+    now = datetime.now(timezone.utc)
+
+    action_items = []
+
+    for request in pending_schedule_requests:
+        action_items.append(
+            (
+                request.created_at,
+                "schedule_proposal",
+                request,
+            )
+        )
+
+    for match in needs_action_matches:
+        if match.status == "awaiting_schedule":
+            action_items.append(
+                (
+                    match.created_at,
+                    "schedule",
+                    match,
+                )
+            )
+            continue
+
+        if (
+            match.status == "scheduled"
+            and match.scheduled_at
+            and match.scheduled_at <= now
+            and match.result_status == "not_submitted"
+        ):
+            action_items.append(
+                (
+                    match.scheduled_at,
+                    "result",
+                    match,
+                )
+            )
+
+    for match in matches:
+        if (
+            match.status == "scheduled"
+            and match.result_status == "pending_confirmation"
+            and match.result_submitted_by_id != user.id
+        ):
+            action_items.append(
+                (
+                    match.updated_at,
+                    "confirmation",
+                    match,
+                )
+            )
+
+    action_items.sort(
+        key=lambda item: item[0],
+        reverse=True,
+    )
+
+    if not action_items:
         await safe_edit_text(
             callback,
             match_empty_message("needs_action"),
@@ -704,12 +882,138 @@ async def needs_action_matches_handler(
         await callback.answer()
         return
 
+    page_size = 4
+    start_index = page * page_size
+    end_index = start_index + page_size
+
+    if start_index >= len(action_items):
+        await callback.answer(
+            "No more actions available."
+        )
+        return
+
+    page_items = action_items[start_index:end_index]
+    has_older = end_index < len(action_items)
+
+    message_parts = [
+        needs_action_header(len(action_items)),
+        "",
+    ]
+
+    keyboard_rows = []
+    result_button_row = []
+
+    for _, action_type, item in page_items:
+
+        if action_type == "schedule":
+            message_parts.append(
+                format_needs_action_schedule(
+                    item,
+                    user.id,
+                )
+            )
+
+            keyboard = get_needs_action_keyboard(
+                action_type="schedule",
+                match_id=item.id,
+            )
+
+        elif action_type == "schedule_proposal":
+            message_parts.append(
+                format_needs_action_schedule_proposal(
+                    item,
+                    user.id,
+                )
+            )
+
+            keyboard = get_needs_action_keyboard(
+                action_type="schedule_proposal",
+                match_id=item.match.id,
+                request_id=item.id,
+            )
+
+        elif action_type == "result":
+            message_parts.append(
+                format_needs_action_result(
+                    item,
+                    user.id,
+                )
+            )
+
+            keyboard = get_needs_action_keyboard(
+                action_type="result",
+                match_id=item.id,
+            )
+
+        elif action_type == "confirmation":
+            message_parts.append(
+                format_needs_action_confirmation(
+                    item,
+                    user.id,
+                )
+            )
+
+            keyboard = get_needs_action_keyboard(
+                action_type="confirmation",
+                match_id=item.id,
+            )
+
+        else:
+            continue
+
+        message_parts.append("")
+
+        if action_type == "result":
+            result_button_row.extend(
+                keyboard.inline_keyboard[0]
+            )
+
+            if len(result_button_row) == 2:
+                keyboard_rows.append(result_button_row)
+                result_button_row = []
+        else:
+            keyboard_rows.extend(
+                keyboard.inline_keyboard
+            )
+
+    if result_button_row:
+        keyboard_rows.append(result_button_row)
+
+    navigation = []
+
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="← Previous",
+                callback_data=f"matches:needs_action:page:{page - 1}",
+            )
+        )
+
+    if has_older:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Next →",
+                callback_data=f"matches:needs_action:page:{page + 1}",
+            )
+        )
+
+    if navigation:
+        keyboard_rows.append(navigation)
+
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(
+                text="Back",
+                callback_data="matches:back",
+            )
+        ]
+    )
+
     await safe_edit_text(
         callback,
-        match_list_message("needs_action"),
-        reply_markup=get_match_list_keyboard(
-            matches=needs_action,
-            prefix="needs_action",
+        "\n".join(message_parts).rstrip(),
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=keyboard_rows
         ),
     )
 
@@ -717,7 +1021,7 @@ async def needs_action_matches_handler(
 
 
 # ============================================================
-# 🏆 COMPLETED
+# COMPLETED
 # ============================================================
 
 
@@ -727,7 +1031,7 @@ async def needs_action_matches_handler(
 async def completed_matches_handler(
     callback: CallbackQuery,
 ) -> None:
-    """Show completed matches, three per page."""
+    """Show completed matches, four per page."""
 
     user = await get_user_by_telegram_id(
         callback.from_user.id
@@ -763,7 +1067,7 @@ async def completed_matches_handler(
         reverse=True,
     )
 
-    page_size = 3
+    page_size = 4
     page = 0
 
     start_index = page * page_size
@@ -773,7 +1077,7 @@ async def completed_matches_handler(
     has_older = end_index < len(completed)
 
     message_parts = [
-        "Completed Matches",
+        "🗃️ Completed",
         "",
     ]
 
@@ -836,7 +1140,7 @@ async def completed_matches_page_handler(
         reverse=True,
     )
 
-    page_size = 3
+    page_size = 4
     start_index = page * page_size
     end_index = start_index + page_size
 
@@ -850,7 +1154,7 @@ async def completed_matches_page_handler(
     has_older = end_index < len(completed)
 
     message_parts = [
-        "Completed Matches",
+        "🗃️ Completed",
         "",
     ]
 
@@ -881,8 +1185,43 @@ async def completed_matches_page_handler(
 async def cancelled_matches_handler(
     callback: CallbackQuery,
 ) -> None:
-    """Show cancelled matches."""
+    """Show cancelled matches, four per page."""
 
+    await _show_cancelled_page(
+        callback=callback,
+        page=0,
+    )
+
+
+@router.callback_query(
+    F.data.startswith("matches:cancelled:page:")
+)
+async def cancelled_matches_page_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Show a page of cancelled matches."""
+
+    page = int(callback.data.rsplit(":", 1)[1])
+
+    if page < 0:
+        await callback.answer()
+        return
+
+    await _show_cancelled_page(
+        callback=callback,
+        page=page,
+    )
+
+
+# ============================================================
+# CANCELLED
+# ============================================================
+
+
+async def _show_cancelled_page(
+    callback: CallbackQuery,
+    page: int,
+) -> None:
     user = await get_user_by_telegram_id(
         callback.from_user.id
     )
@@ -912,12 +1251,28 @@ async def cancelled_matches_handler(
         await callback.answer()
         return
 
+    page_size = 4
+    start_index = page * page_size
+    end_index = start_index + page_size
+
+    if start_index >= len(cancelled):
+        await callback.answer(
+            "No more cancelled matches available."
+        )
+        return
+
+    page_matches = cancelled[start_index:end_index]
+    has_older = end_index < len(cancelled)
+
     await safe_edit_text(
         callback,
-        match_list_message("cancelled"),
-        reply_markup=get_match_list_keyboard(
-            matches=cancelled,
-            prefix="cancelled",
+        format_cancelled_matches_message(
+            matches=page_matches,
+            user_id=user.id,
+        ),
+        reply_markup=get_cancelled_matches_keyboard(
+            page=page,
+            has_older=has_older,
         ),
     )
 
@@ -925,7 +1280,7 @@ async def cancelled_matches_handler(
 
 
 # ============================================================
-# 👁️ VIEW INDIVIDUAL MATCH
+# VIEW INDIVIDUAL MATCH
 # ============================================================
 
 
@@ -975,6 +1330,43 @@ async def view_match_handler(
         return
 
     # --------------------------------------------------------
+    # UPCOMING MATCH DETAIL
+    # --------------------------------------------------------
+
+    if section == "upcoming":
+        opponent = (
+            match.player_two
+            if match.player_one_id == user.id
+            else match.player_one
+        )
+
+        opponent_rank, _ = await get_player_rank(
+            opponent.id
+        )
+
+        opponent_streak, _ = await get_player_match_stats(
+            opponent.id
+        )
+
+        await safe_edit_text(
+            callback,
+            format_upcoming_match_detail(
+                match=match,
+                user_id=user.id,
+                opponent_rank=opponent_rank,
+                opponent_streak=opponent_streak,
+            ),
+            reply_markup=get_match_navigation_keyboard(
+                match_id=match.id,
+                section=section,
+                status=match.status,
+            ),
+        )
+
+        await callback.answer()
+        return
+
+    # --------------------------------------------------------
     # NEEDS ACTION RESULT VIEW
     # --------------------------------------------------------
 
@@ -993,16 +1385,26 @@ async def view_match_handler(
                 and match.result_submitted_by_id != user.id
             )
 
-            reply_markup = get_result_navigation_keyboard(
+            result_actions = get_result_actions_keyboard(
                 match_id=match.id,
-                section=section,
                 result_status=match.result_status,
                 can_confirm=can_confirm,
             )
 
+            result_actions.inline_keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text="Back",
+                        callback_data="matches:needs_action",
+                    )
+                ]
+            )
+
+            reply_markup = result_actions
+
         await safe_edit_text(
             callback,
-            format_match_text(
+            format_match_message(
                 match=match,
                 user_id=user.id,
             ),
@@ -1011,953 +1413,3 @@ async def view_match_handler(
 
         await callback.answer()
         return
-
-    # --------------------------------------------------------
-    # ALL OTHER MATCH VIEWS
-    # --------------------------------------------------------
-
-    await safe_edit_text(
-        callback,
-        format_match_text(
-            match=match,
-            user_id=user.id,
-        ),
-        reply_markup=get_match_navigation_keyboard(
-            match_id=match.id,
-            section=section,
-            status=match.status,
-        ),
-    )
-
-    await callback.answer()
-
-# ============================================================
-# ✅ CONFIRM RESULT
-# ============================================================
-
-
-@router.callback_query(
-    F.data.startswith("matches:confirm_result:")
-)
-async def confirm_result_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Confirm a submitted Best-of-3 match result."""
-
-    match_id = int(
-        callback.data.split(":")[2]
-    )
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    try:
-        match = await confirm_match_result(
-            match_id=match_id,
-            confirmed_by_id=user.id,
-        )
-
-    except ValueError as error:
-        await callback.answer(
-            str(error),
-            show_alert=True,
-        )
-        return
-
-    winner = (
-        match.player_one
-        if match.winner_id == match.player_one_id
-        else match.player_two
-    )
-
-    loser = (
-        match.player_two
-        if match.winner_id == match.player_one_id
-        else match.player_one
-    )
-
-    result_text = (
-        "✅ RESULT CONFIRMED\n\n"
-        f"🎾 Match #{match.id}\n\n"
-        f"Set 1: "
-        f"{match.set_1_player_one_score}-"
-        f"{match.set_1_player_two_score}\n"
-        f"Set 2: "
-        f"{match.set_2_player_one_score}-"
-        f"{match.set_2_player_two_score}"
-    )
-
-    if (
-        match.set_3_player_one_score is not None
-        and match.set_3_player_two_score is not None
-    ):
-        result_text += (
-            f"\n"
-            f"Set 3: "
-            f"{match.set_3_player_one_score}-"
-            f"{match.set_3_player_two_score}"
-        )
-
-    result_text += (
-        "\n\n"
-        f"🏆 Winner: "
-        f"{winner.first_name} {winner.last_name}\n"
-        f"🎾 Loser: "
-        f"{loser.first_name} {loser.last_name}\n\n"
-        "The match has been completed."
-    )
-
-    await safe_edit_text(
-        callback,
-        result_text,
-    )
-
-    await callback.answer(
-        "Result confirmed."
-    )
-
-
-# ============================================================
-# 📝 SUBMIT RESULT
-# ============================================================
-
-
-def parse_set_score(text: str) -> tuple[int, int]:
-    """
-    Parse a set score entered as Player 1:Player 2.
-
-    Example:
-        6:4
-    """
-
-    value = text.strip()
-    parts = value.split(":")
-
-    if len(parts) != 2:
-        raise ValueError(
-            "Please enter the score in this format: 6:4"
-        )
-
-    player_one_text = parts[0].strip()
-    player_two_text = parts[1].strip()
-
-    if not (
-        player_one_text.isdigit()
-        and player_two_text.isdigit()
-    ):
-        raise ValueError(
-            "Scores must be numbers. Example: 6:4"
-        )
-
-    player_one_score = int(player_one_text)
-    player_two_score = int(player_two_text)
-
-    if player_one_score < 0 or player_two_score < 0:
-        raise ValueError(
-            "Scores cannot be negative."
-        )
-
-    return player_one_score, player_two_score
-
-
-async def _validate_and_parse_set_score(
-    message: Message,
-) -> tuple[int, int] | None:
-    """Parse and validate one tennis set score."""
-
-    try:
-        player_one_score, player_two_score = (
-            parse_set_score(message.text or "")
-        )
-    except ValueError as error:
-        await message.answer(
-            score_parse_error_message(str(error))
-        )
-        return None
-
-    from services.tennis_scoring import validate_set_score
-
-    try:
-        validate_set_score(
-            player_one_score=player_one_score,
-            player_two_score=player_two_score,
-        )
-    except ValueError as error:
-        await message.answer(
-            invalid_set_score_message(str(error))
-        )
-        return None
-
-    return player_one_score, player_two_score
-
-
-@router.callback_query(
-    F.data.startswith("matches:submit_result:")
-)
-async def submit_result_handler(
-    callback: CallbackQuery,
-    state,
-) -> None:
-    """Start the Best-of-3 match result submission flow."""
-
-    match_id = int(
-        callback.data.split(":")[2]
-    )
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    match = await get_match_by_id(match_id)
-
-    if not match:
-        await callback.answer(
-            "Match not found.",
-            show_alert=True,
-        )
-        return
-
-    if user.id not in (
-        match.player_one_id,
-        match.player_two_id,
-    ):
-        await callback.answer(
-            "You are not a player in this match.",
-            show_alert=True,
-        )
-        return
-
-    if match.status != "scheduled":
-        await callback.answer(
-            "This match is not available for result submission.",
-            show_alert=True,
-        )
-        return
-
-    if match.result_status != "not_submitted":
-        await callback.answer(
-            "A result has already been submitted.",
-            show_alert=True,
-        )
-        return
-
-    await state.clear()
-
-    await state.update_data(
-        match_id=match_id,
-        submitted_by_id=user.id,
-    )
-
-    await state.set_state(
-        MatchResultStates.waiting_for_set_1_score
-    )
-
-    await callback.message.answer(
-        result_submission_message(match)
-    )
-
-    await callback.answer()
-
-
-@router.message(
-    MatchResultStates.waiting_for_set_1_score
-)
-async def set_1_score_handler(
-    message: Message,
-    state,
-) -> None:
-    """Receive and validate Set 1."""
-
-    result = await _validate_and_parse_set_score(message)
-
-    if result is None:
-        return
-
-    player_one_score, player_two_score = result
-
-    await state.update_data(
-        set_1_player_one_score=player_one_score,
-        set_1_player_two_score=player_two_score,
-    )
-
-    await state.set_state(
-        MatchResultStates.waiting_for_set_2_score
-    )
-
-    await message.answer(
-        set_2_submission_message(
-            player_one_score=player_one_score,
-            player_two_score=player_two_score,
-        )
-    )
-
-
-@router.message(
-    MatchResultStates.waiting_for_set_2_score
-)
-async def set_2_score_handler(
-    message: Message,
-    state,
-) -> None:
-    """Receive and validate Set 2."""
-
-    result = await _validate_and_parse_set_score(message)
-
-    if result is None:
-        return
-
-    player_one_score, player_two_score = result
-
-    data = await state.get_data()
-
-    set_1_player_one_score = data.get(
-        "set_1_player_one_score"
-    )
-    set_1_player_two_score = data.get(
-        "set_1_player_two_score"
-    )
-
-    if (
-        set_1_player_one_score is None
-        or set_1_player_two_score is None
-    ):
-        await state.clear()
-
-        await message.answer(
-            result_session_expired_message()
-        )
-        return
-
-    await state.update_data(
-        set_2_player_one_score=player_one_score,
-        set_2_player_two_score=player_two_score,
-    )
-
-    from services.tennis_scoring import get_match_winner
-
-    try:
-        match_winner = get_match_winner(
-            set_1_player_one_score=set_1_player_one_score,
-            set_1_player_two_score=set_1_player_two_score,
-            set_2_player_one_score=player_one_score,
-            set_2_player_two_score=player_two_score,
-        )
-    except ValueError as error:
-        await message.answer(
-            invalid_match_result_message(str(error))
-        )
-        return
-
-    if match_winner is not None:
-        await _finalize_result_submission(
-            message=message,
-            state=state,
-        )
-        return
-
-    await state.set_state(
-        MatchResultStates.waiting_for_set_3_score
-    )
-
-    await message.answer(
-        set_3_submission_message(
-            set_1_player_one_score=set_1_player_one_score,
-            set_1_player_two_score=set_1_player_two_score,
-            set_2_player_one_score=player_one_score,
-            set_2_player_two_score=player_two_score,
-        )
-    )
-
-
-@router.message(
-    MatchResultStates.waiting_for_set_3_score
-)
-async def set_3_score_handler(
-    message: Message,
-    state,
-) -> None:
-    """Receive and validate Set 3."""
-
-    result = await _validate_and_parse_set_score(message)
-
-    if result is None:
-        return
-
-    player_one_score, player_two_score = result
-
-    data = await state.get_data()
-
-    set_1_player_one_score = data.get(
-        "set_1_player_one_score"
-    )
-    set_1_player_two_score = data.get(
-        "set_1_player_two_score"
-    )
-    set_2_player_one_score = data.get(
-        "set_2_player_one_score"
-    )
-    set_2_player_two_score = data.get(
-        "set_2_player_two_score"
-    )
-
-    if (
-        set_1_player_one_score is None
-        or set_1_player_two_score is None
-        or set_2_player_one_score is None
-        or set_2_player_two_score is None
-    ):
-        await state.clear()
-
-        await message.answer(
-            result_session_expired_message()
-        )
-        return
-
-    await state.update_data(
-        set_3_player_one_score=player_one_score,
-        set_3_player_two_score=player_two_score,
-    )
-
-    await _finalize_result_submission(
-        message=message,
-        state=state,
-    )
-
-
-# ============================================================
-# 🏁 FINALIZE RESULT SUBMISSION
-# ============================================================
-
-
-async def _finalize_result_submission(
-    message: Message,
-    state,
-) -> None:
-    """Submit the complete Best-of-3 result for confirmation."""
-
-    data = await state.get_data()
-
-    match_id = data.get("match_id")
-    submitted_by_id = data.get("submitted_by_id")
-
-    set_1_player_one_score = data.get(
-        "set_1_player_one_score"
-    )
-    set_1_player_two_score = data.get(
-        "set_1_player_two_score"
-    )
-    set_2_player_one_score = data.get(
-        "set_2_player_one_score"
-    )
-    set_2_player_two_score = data.get(
-        "set_2_player_two_score"
-    )
-    set_3_player_one_score = data.get(
-        "set_3_player_one_score"
-    )
-    set_3_player_two_score = data.get(
-        "set_3_player_two_score"
-    )
-
-    if (
-        match_id is None
-        or submitted_by_id is None
-        or set_1_player_one_score is None
-        or set_1_player_two_score is None
-        or set_2_player_one_score is None
-        or set_2_player_two_score is None
-    ):
-        await state.clear()
-
-        await message.answer(
-            result_session_expired_message()
-        )
-        return
-
-    try:
-        match = await submit_match_result(
-            match_id=match_id,
-            submitted_by_id=submitted_by_id,
-            set_1_player_one_score=set_1_player_one_score,
-            set_1_player_two_score=set_1_player_two_score,
-            set_2_player_one_score=set_2_player_one_score,
-            set_2_player_two_score=set_2_player_two_score,
-            set_3_player_one_score=set_3_player_one_score,
-            set_3_player_two_score=set_3_player_two_score,
-        )
-    except ValueError as error:
-        await message.answer(
-            str(error)
-        )
-        return
-
-    await state.clear()
-
-    await message.answer(
-        submitted_result_message(
-            match_id=match.id,
-            set_1_player_one_score=set_1_player_one_score,
-            set_1_player_two_score=set_1_player_two_score,
-            set_2_player_one_score=set_2_player_one_score,
-            set_2_player_two_score=set_2_player_two_score,
-            set_3_player_one_score=set_3_player_one_score,
-            set_3_player_two_score=set_3_player_two_score,
-        )
-    )
-
-
-# 🔙 BACK TO MAIN MY MATCHES
-# ============================================================
-
-
-@router.callback_query(
-    F.data == "matches:back"
-)
-async def matches_back_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Return to the main My Matches menu."""
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    matches = await get_matches_for_user(
-        user.id
-    )
-
-    upcoming = get_upcoming_matches(
-        matches
-    )
-
-    needs_action = get_needs_action_matches(
-        matches
-    )
-
-    completed = get_completed_matches(
-        matches
-    )
-
-    cancelled = get_cancelled_matches(
-        matches
-    )
-
-    await safe_edit_text(
-        callback,
-        my_matches_message(
-            upcoming_count=len(upcoming),
-            needs_action_count=len(needs_action),
-            completed_count=len(completed),
-            cancelled_count=len(cancelled),
-        ),
-        reply_markup=get_my_matches_keyboard(),
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# 🔙 BACK TO MATCH LIST
-# ============================================================
-
-
-@router.callback_query(
-    F.data.startswith("matches:list:")
-)
-async def matches_list_back_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Return from an individual match to its section."""
-
-    section = callback.data.split(":")[2]
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    matches = await get_matches_for_user(
-        user.id
-    )
-
-    if section == "upcoming":
-        section_matches = get_upcoming_matches(
-            matches
-        )
-        title = "🟢 UPCOMING"
-
-    elif section == "needs_action":
-        section_matches = get_needs_action_matches(
-            matches
-        )
-        title = "🔴 NEEDS ACTION"
-
-    elif section == "completed":
-        section_matches = get_completed_matches(
-            matches
-        )
-        title = "🏆 COMPLETED"
-
-    elif section == "cancelled":
-        section_matches = get_cancelled_matches(
-            matches
-        )
-        title = "🚫 CANCELLED"
-
-    else:
-        await callback.answer(
-            "Unknown match section.",
-            show_alert=True,
-        )
-        return
-
-    if not section_matches:
-        await safe_edit_text(
-            callback,
-            f"{title}\n\n"
-            "There are no matches in this section.",
-            reply_markup=get_my_matches_keyboard(),
-        )
-
-        await callback.answer()
-        return
-
-    await safe_edit_text(
-        callback,
-        f"{title}\n\n"
-        "Select a match:",
-        reply_markup=get_match_list_keyboard(
-            matches=section_matches,
-            prefix=section,
-        ),
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# 🔄 REFRESH
-# ============================================================
-
-
-@router.callback_query(
-    F.data == "matches:refresh"
-)
-async def refresh_matches_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Refresh the main My Matches menu."""
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    matches = await get_matches_for_user(
-        user.id
-    )
-
-    upcoming = get_upcoming_matches(
-        matches
-    )
-
-    needs_action = get_needs_action_matches(
-        matches
-    )
-
-    completed = get_completed_matches(
-        matches
-    )
-
-    cancelled = get_cancelled_matches(
-        matches
-    )
-
-    await safe_edit_text(
-        callback,
-        my_matches_message(
-            upcoming_count=len(upcoming),
-            needs_action_count=len(needs_action),
-            completed_count=len(completed),
-            cancelled_count=len(cancelled),
-        ),
-        reply_markup=get_my_matches_keyboard(),
-    )
-
-    await callback.answer(
-        "Matches refreshed."
-    )
-
-
-# ============================================================
-# ❌ CANCEL MATCH
-# ============================================================
-
-
-@router.callback_query(
-    F.data.startswith("matches:cancel:")
-)
-async def cancel_match_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Show the cancellation confirmation screen."""
-
-    match_id = int(
-        callback.data.split(":")[2]
-    )
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    match = await get_match_by_id(
-        match_id
-    )
-
-    if not match:
-        await callback.answer(
-            "Match not found.",
-            show_alert=True,
-        )
-        return
-
-    if user.id not in (
-        match.player_one_id,
-        match.player_two_id,
-    ):
-        await callback.answer(
-            "You are not a player in this match.",
-            show_alert=True,
-        )
-        return
-
-    if match.status == "completed":
-        await callback.answer(
-            "A completed match cannot be cancelled.",
-            show_alert=True,
-        )
-        return
-
-    if match.status == "cancelled":
-        await callback.answer(
-            "This match has already been cancelled.",
-            show_alert=True,
-        )
-        return
-
-    opponent = (
-        match.player_two
-        if match.player_one_id == user.id
-        else match.player_one
-    )
-
-    now = datetime.now(timezone.utc)
-
-    scheduled_at = match.scheduled_at
-
-    if scheduled_at and scheduled_at.tzinfo is None:
-        scheduled_at = scheduled_at.replace(
-            tzinfo=timezone.utc
-        )
-
-    if (
-        match.status == "scheduled"
-        and scheduled_at
-        and scheduled_at <= now
-    ):
-        section = "needs_action"
-    else:
-        section = "upcoming"
-
-    await safe_edit_text(
-        callback,
-        "⚠️ Cancel Match?\n\n"
-        "Are you sure you want to cancel "
-        "this match?\n\n"
-        f"Your opponent, {opponent.first_name} "
-        f"{opponent.last_name}, will be notified.",
-        reply_markup=get_cancel_confirmation_keyboard(
-            match_id=match_id,
-            section=section,
-        ),
-    )
-
-    await callback.answer()
-
-
-# ============================================================
-# ✅ CONFIRM CANCEL
-# ============================================================
-
-
-@router.callback_query(
-    F.data.startswith("matches:confirm_cancel:")
-)
-async def confirm_cancel_match_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Cancel the match after the user confirms."""
-
-    parts = callback.data.split(":")
-
-    match_id = int(parts[3])
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    try:
-        match = await cancel_match(
-            match_id=match_id,
-            user_id=user.id,
-        )
-
-    except ValueError as error:
-        await callback.answer(
-            str(error),
-            show_alert=True,
-        )
-        return
-
-    opponent = (
-        match.player_two
-        if match.player_one_id == user.id
-        else match.player_one
-    )
-
-    await safe_edit_text(
-        callback,
-        "❌ Match Cancelled\n\n"
-        f"Your match against "
-        f"{opponent.first_name} "
-        f"{opponent.last_name} has been cancelled.",
-    )
-
-    await callback.bot.send_message(
-        chat_id=opponent.telegram_id,
-        text=(
-            "❌ Match Cancelled\n\n"
-            f"{user.first_name} "
-            f"{user.last_name} cancelled your match.\n\n"
-            "The match has been removed from your "
-            "active schedule."
-        ),
-    )
-
-    await callback.answer(
-        "Match cancelled."
-    )
-
-
-# ============================================================
-# ↩️ KEEP MATCH
-# ============================================================
-
-
-@router.callback_query(
-    F.data.startswith("matches:keep:")
-)
-async def keep_match_handler(
-    callback: CallbackQuery,
-) -> None:
-    """Return to the match after cancelling was declined."""
-
-    parts = callback.data.split(":")
-
-    section = parts[2]
-    match_id = int(parts[3])
-
-    user = await get_user_by_telegram_id(
-        callback.from_user.id
-    )
-
-    if not user:
-        await callback.answer(
-            "Profile not found.",
-            show_alert=True,
-        )
-        return
-
-    match = await get_match_by_id(
-        match_id
-    )
-
-    if not match:
-        await callback.answer(
-            "Match not found.",
-            show_alert=True,
-        )
-        return
-
-    if user.id not in (
-        match.player_one_id,
-        match.player_two_id,
-    ):
-        await callback.answer(
-            "You are not a player in this match.",
-            show_alert=True,
-        )
-        return
-
-    await safe_edit_text(
-        callback,
-        format_match_text(
-            match=match,
-            user_id=user.id,
-        ),
-        reply_markup=get_match_navigation_keyboard(
-            match_id=match.id,
-            section=section,
-            status=match.status,
-        ),
-    )
-
-    await callback.answer()

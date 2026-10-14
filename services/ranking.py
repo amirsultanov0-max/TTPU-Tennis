@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from database.database import AsyncSessionLocal
 from database.models import User
@@ -40,10 +40,11 @@ async def get_total_players() -> int:
     async with AsyncSessionLocal() as session:
 
         result = await session.execute(
-            select(User.id)
+            select(func.count())
+            .select_from(User)
         )
 
-        return len(result.scalars().all())
+        return result.scalar_one()
 
 
 async def get_player_rank(user_id: int) -> tuple[int, int]:
@@ -53,22 +54,41 @@ async def get_player_rank(user_id: int) -> tuple[int, int]:
     The ranking order matches get_rankings().
     """
 
+    ranking_order = [
+        User.ranking_points.desc(),
+        User.wins.desc(),
+        User.first_name.asc(),
+        User.last_name.asc(),
+    ]
+
+    ranked_players = (
+        select(
+            User.id,
+            func.row_number().over(
+                order_by=ranking_order
+            ).label("rank"),
+            func.count().over().label("total_players"),
+        )
+        .subquery()
+    )
+
     async with AsyncSessionLocal() as session:
 
         result = await session.execute(
-            select(User)
-            .order_by(
-                User.ranking_points.desc(),
-                User.wins.desc(),
-                User.first_name.asc(),
-                User.last_name.asc(),
+            select(
+                ranked_players.c.rank,
+                ranked_players.c.total_players,
             )
+            .where(ranked_players.c.id == user_id)
         )
 
-        players = list(result.scalars().all())
+        player_rank = result.one_or_none()
 
-    for position, player in enumerate(players, start=1):
-        if player.id == user_id:
-            return position, len(players)
+        if player_rank is None:
+            total_result = await session.execute(
+                select(func.count())
+                .select_from(User)
+            )
+            return 0, int(total_result.scalar_one())
 
-    return 0, len(players)
+    return int(player_rank.rank), int(player_rank.total_players)

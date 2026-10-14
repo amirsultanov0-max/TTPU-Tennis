@@ -98,7 +98,6 @@ class User(Base):
         BigInteger,
         unique=True,
         nullable=False,
-        index=True,
     )
 
     telegram_username: Mapped[str | None] = mapped_column(
@@ -128,7 +127,6 @@ class User(Base):
         String(50),
         unique=True,
         nullable=False,
-        index=True,
     )
 
     phone: Mapped[str | None] = mapped_column(
@@ -140,7 +138,6 @@ class User(Base):
         Integer,
         default=0,
         nullable=False,
-        index=True,
     )
 
     wins: Mapped[int] = mapped_column(

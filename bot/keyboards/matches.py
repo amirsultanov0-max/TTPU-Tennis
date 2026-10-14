@@ -40,19 +40,51 @@ def get_my_matches_keyboard() -> InlineKeyboardMarkup:
         ]
     )
 
+
+def get_schedule_accepted_keyboard() -> InlineKeyboardMarkup:
+    """Return navigation after accepting a schedule request."""
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="My Matches",
+                    callback_data="matches:back",
+                )
+            ],
+        ]
+    )
+
+
 # ============================================================
 # MATCH LISTS
 # ============================================================
 
 
 def get_upcoming_matches_keyboard(
+    visible_matches,
     previous_index: int | None,
     next_index: int | None,
     current_index: int,
 ) -> InlineKeyboardMarkup:
-    """Return navigation controls for upcoming match pages."""
+    """Return match-selection and navigation controls for an upcoming page."""
 
     buttons: list[list[InlineKeyboardButton]] = []
+
+    match_buttons: list[InlineKeyboardButton] = []
+
+    for match in visible_matches:
+        match_buttons.append(
+            InlineKeyboardButton(
+                text=f"Match #{match.id}",
+                callback_data=(
+                    f"matches:view:upcoming:{match.id}"
+                ),
+            )
+        )
+
+    for index in range(0, len(match_buttons), 2):
+        buttons.append(match_buttons[index:index + 2])
 
     navigation: list[InlineKeyboardButton] = []
 
@@ -139,42 +171,127 @@ def get_completed_matches_keyboard(
     )
 
 
-def get_match_list_keyboard(
-    matches,
-    prefix: str,
+def get_needs_action_keyboard(
+    action_type: str,
+    match_id: int | None = None,
+    request_id: int | None = None,
 ) -> InlineKeyboardMarkup:
-    """
-    Return a keyboard containing one button per match.
-
-    The prefix identifies the My Matches section
-    currently being viewed.
-    """
+    """Return actions for a Needs Action inbox item."""
 
     buttons: list[list[InlineKeyboardButton]] = []
 
-    for match in matches:
+    if action_type == "schedule":
+        if match_id is None:
+            raise ValueError("match_id is required for schedule actions.")
+
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=f"Match #{match.id}",
+                    text=f"#{match_id} Propose Date & Time",
                     callback_data=(
-                        f"matches:view:{prefix}:{match.id}"
+                        f"matches:propose_schedule:{match_id}"
                     ),
                 )
             ]
         )
 
-    buttons.append(
-        [
-            InlineKeyboardButton(
-                text="Back",
-                callback_data="matches:back",
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{match_id} Cancel Match",
+                    callback_data=(
+                        f"matches:cancel:{match_id}"
+                    ),
+                )
+            ]
+        )
+
+    elif action_type == "schedule_proposal":
+        if request_id is None:
+            raise ValueError(
+                "request_id is required for schedule proposals."
             )
-        ]
-    )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{match_id} Accept",
+                    callback_data=(
+                        f"scheduling:accept:{request_id}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text=f"#{match_id} Decline",
+                    callback_data=(
+                        f"scheduling:reject:{request_id}"
+                    ),
+                ),
+            ]
+        )
+
+    elif action_type == "result":
+        if match_id is None:
+            raise ValueError("match_id is required for result actions.")
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{match_id} Submit Result",
+                    callback_data=(
+                        f"matches:submit_result:{match_id}"
+                    ),
+                )
+            ]
+        )
+
+    elif action_type == "confirmation":
+        if match_id is None:
+            raise ValueError(
+                "match_id is required for result confirmation."
+            )
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{match_id} Confirm Result",
+                    callback_data=(
+                        f"matches:confirm_result:{match_id}"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    text=f"#{match_id} Report Issue",
+                    callback_data=(
+                        f"matches:dispute_result:{match_id}"
+                    ),
+                ),
+            ]
+        )
 
     return InlineKeyboardMarkup(
         inline_keyboard=buttons
+    )
+
+
+def get_result_reminder_keyboard(
+    match_id: int,
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Submit Result",
+                    callback_data=(
+                        f"matches:submit_result:{match_id}"
+                    ),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="My Matches",
+                    callback_data="matches:open",
+                )
+            ],
+        ]
     )
 
 
@@ -353,13 +470,17 @@ def get_match_navigation_keyboard(
         actions.inline_keyboard
     )
 
+    back_callback = (
+        "matches:upcoming"
+        if section == "upcoming"
+        else "matches:needs_action"
+    )
+
     buttons.append(
         [
             InlineKeyboardButton(
                 text="Back",
-                callback_data=(
-                    f"matches:list:{section}"
-                ),
+                callback_data=back_callback,
             )
         ]
     )
@@ -369,41 +490,40 @@ def get_match_navigation_keyboard(
     )
 
 
-# ============================================================
-# RESULT MATCH NAVIGATION
-# ============================================================
-
-
-def get_result_navigation_keyboard(
-    match_id: int,
-    section: str,
-    result_status: str,
-    can_confirm: bool = False,
+def get_cancelled_matches_keyboard(
+    page: int,
+    has_older: bool,
 ) -> InlineKeyboardMarkup:
-    """
-    Return result actions and navigation for a
-    Needs Action match.
-    """
+    """Return navigation controls for cancelled match history."""
 
     buttons: list[list[InlineKeyboardButton]] = []
 
-    actions = get_result_actions_keyboard(
-        match_id=match_id,
-        result_status=result_status,
-        can_confirm=can_confirm,
-    )
+    navigation: list[InlineKeyboardButton] = []
 
-    buttons.extend(
-        actions.inline_keyboard
-    )
+    if page > 0:
+        navigation.append(
+            InlineKeyboardButton(
+                text="← Previous",
+                callback_data=f"matches:cancelled:page:{page - 1}",
+            )
+        )
+
+    if has_older:
+        navigation.append(
+            InlineKeyboardButton(
+                text="Next →",
+                callback_data=f"matches:cancelled:page:{page + 1}",
+            )
+        )
+
+    if navigation:
+        buttons.append(navigation)
 
     buttons.append(
         [
             InlineKeyboardButton(
                 text="Back",
-                callback_data=(
-                    f"matches:list:{section}"
-                ),
+                callback_data="matches:back",
             )
         ]
     )
@@ -411,11 +531,6 @@ def get_result_navigation_keyboard(
     return InlineKeyboardMarkup(
         inline_keyboard=buttons
     )
-
-
-# ============================================================
-# CANCEL CONFIRMATION
-# ============================================================
 
 
 def get_cancel_confirmation_keyboard(

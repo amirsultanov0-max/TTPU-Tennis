@@ -1,6 +1,7 @@
 from aiogram import Bot
 
 from bot.ui.messages.matches import result_reminder_message
+from bot.keyboards.matches import get_result_reminder_keyboard
 from services.matches import (
     get_matches_needing_result_reminder,
     mark_result_reminder_sent,
@@ -26,11 +27,13 @@ async def send_result_reminders(
         await bot.send_message(
             chat_id=match.player_one.telegram_id,
             text=reminder_text,
+            reply_markup=get_result_reminder_keyboard(match.id),
         )
 
         await bot.send_message(
             chat_id=match.player_two.telegram_id,
             text=reminder_text,
+            reply_markup=get_result_reminder_keyboard(match.id),
         )
 
         await mark_result_reminder_sent(

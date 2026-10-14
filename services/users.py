@@ -183,3 +183,27 @@ async def create_user(
         except Exception:
             await session.rollback()
             raise
+
+async def get_other_users(
+    user_id: int,
+) -> list[User]:
+    """
+    Get all registered players except the current user.
+    """
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User)
+            .options(
+                selectinload(User.group)
+            )
+            .where(
+                User.id != user_id
+            )
+            .order_by(
+                User.first_name.asc(),
+                User.last_name.asc(),
+            )
+        )
+
+        return list(result.scalars().all())

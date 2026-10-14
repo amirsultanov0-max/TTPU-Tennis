@@ -158,6 +158,48 @@ async def get_match_by_id(
         return result.scalar_one_or_none()
 
 
+async def get_player_match_stats(
+    user_id: int,
+) -> tuple[int, int]:
+    """
+    Get a player's current winning streak and total confirmed matches.
+
+    Returns:
+        (winning_streak, total_confirmed_matches)
+    """
+
+    async with AsyncSessionLocal() as session:
+
+        result = await session.execute(
+            select(Match)
+            .where(
+                Match.status == MATCH_STATUS_COMPLETED,
+                Match.result_status == RESULT_STATUS_CONFIRMED,
+                or_(
+                    Match.player_one_id == user_id,
+                    Match.player_two_id == user_id,
+                ),
+            )
+            .order_by(
+                Match.played_at.desc()
+            )
+        )
+
+        matches = list(
+            result.scalars().all()
+        )
+
+    winning_streak = 0
+
+    for match in matches:
+        if match.winner_id == user_id:
+            winning_streak += 1
+        else:
+            break
+
+    return winning_streak, len(matches)
+
+
 async def get_matches_for_user(
     user_id: int,
 ) -> list[Match]:
@@ -293,7 +335,8 @@ async def mark_result_reminder_sent(
     async with AsyncSessionLocal() as session:
 
         result = await session.execute(
-            select(Match).where(
+            select(Match)
+            .where(
                 Match.id == match_id
             )
         )
@@ -368,9 +411,15 @@ async def submit_match_result(
     async with AsyncSessionLocal() as session:
 
         result = await session.execute(
-            select(Match).where(
+            select(Match)
+            .options(
+                selectinload(Match.player_one),
+                selectinload(Match.player_two),
+            )
+            .where(
                 Match.id == match_id
             )
+            .with_for_update()
         )
 
         match = result.scalar_one_or_none()
@@ -492,6 +541,7 @@ async def confirm_match_result(
             .where(
                 Match.id == match_id
             )
+            .with_for_update()
         )
 
         match = result.scalar_one_or_none()
@@ -614,22 +664,6 @@ async def confirm_match_result(
         match.played_at = now
 
         match.result_confirmed_at = now
-
-        # ----------------------------------------------------
-        # Update player statistics
-        # ----------------------------------------------------
-
-        if winner_id == player_one.id:
-            player_one.wins += 1
-            player_two.losses += 1
-        else:
-            player_two.wins += 1
-            player_one.losses += 1
-
-        await session.commit()
-        await session.refresh(match)
-
-        return match
 
         # ----------------------------------------------------
         # Update player statistics
@@ -882,7 +916,12 @@ async def get_schedule_request_by_id(
         result = await session.execute(
             select(ScheduleRequest)
             .options(
-                selectinload(ScheduleRequest.match),
+                selectinload(ScheduleRequest.match).selectinload(
+                    Match.player_one
+                ),
+                selectinload(ScheduleRequest.match).selectinload(
+                    Match.player_two
+                ),
                 selectinload(ScheduleRequest.requested_by),
                 selectinload(ScheduleRequest.recipient),
             )
@@ -906,7 +945,12 @@ async def get_pending_schedule_requests(
         result = await session.execute(
             select(ScheduleRequest)
             .options(
-                selectinload(ScheduleRequest.match),
+                selectinload(ScheduleRequest.match).selectinload(
+                    Match.player_one
+                ),
+                selectinload(ScheduleRequest.match).selectinload(
+                    Match.player_two
+                ),
                 selectinload(ScheduleRequest.requested_by),
                 selectinload(ScheduleRequest.recipient),
             )

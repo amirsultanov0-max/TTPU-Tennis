@@ -8,6 +8,9 @@ from aiogram.types import CallbackQuery, Message
 from bot.keyboards.scheduling import (
     get_schedule_request_keyboard,
 )
+from bot.keyboards.matches import (
+    get_schedule_accepted_keyboard,
+)
 from bot.states.scheduling import SchedulingStates
 from bot.ui.messages.common import (
     profile_not_found_message,
@@ -19,6 +22,7 @@ from bot.ui.messages.scheduling import (
     invalid_time_format_message,
     match_scheduled_message,
     schedule_change_accepted_message,
+    schedule_accepted_confirmation_message,
     schedule_change_rejected_message,
     schedule_change_request_message,
     schedule_change_sent_message,
@@ -92,6 +96,75 @@ async def start_scheduling_handler(
 
 
 # ============================================================
+# PROPOSE ANOTHER TIME
+# ============================================================
+
+
+@router.callback_query(
+    F.data.startswith("scheduling:propose_again:")
+)
+async def propose_another_time_handler(
+    callback: CallbackQuery,
+    state: FSMContext,
+) -> None:
+    """
+    Start a new scheduling proposal using the same match.
+    """
+
+    request_id = int(
+        callback.data.split(":")[2]
+    )
+
+    user = await get_user_by_telegram_id(
+        callback.from_user.id
+    )
+
+    if not user:
+        await callback.answer(
+            "Profile not found.",
+            show_alert=True,
+        )
+        return
+
+    pending_request = await get_schedule_request_by_id(
+        request_id
+    )
+
+    if not pending_request:
+        await callback.answer(
+            "Schedule request not found.",
+            show_alert=True,
+        )
+        return
+
+    if pending_request.recipient_id != user.id:
+        await callback.answer(
+            "This request is not for you.",
+            show_alert=True,
+        )
+        return
+
+    match = pending_request.match
+
+    await state.update_data(
+        match_id=match.id,
+        is_change=match.status == "scheduled",
+    )
+
+    await state.set_state(
+        SchedulingStates.date
+    )
+
+    await callback.answer()
+
+    await callback.message.answer(
+        schedule_match_message()
+        if match.status != "scheduled"
+        else change_match_time_message()
+    )
+
+
+# ============================================================
 # DATE
 # ============================================================
 
@@ -110,7 +183,7 @@ async def scheduling_date_handler(
     if not message.text:
         await message.answer(
             "Please enter the date as text.\n\n"
-            "Example: 2026-10-10"
+            "Example: 31-10-2026"
         )
         return
 
@@ -119,12 +192,24 @@ async def scheduling_date_handler(
     try:
         proposed_date = datetime.strptime(
             date_text,
-            "%Y-%m-%d",
+            "%d-%m-%Y",
         ).date()
 
     except ValueError:
         await message.answer(
             invalid_date_format_message()
+        )
+        return
+
+    today = datetime.now(
+        TASHKENT_TIMEZONE
+    ).date()
+
+    if proposed_date < today:
+        await message.answer(
+            "That date has already passed.\n\n"
+            "Please enter today or a future date.\n\n"
+            "Example: 31-10-2026"
         )
         return
 
@@ -203,6 +288,17 @@ async def scheduling_time_handler(
     ).replace(
         tzinfo=TASHKENT_TIMEZONE,
     )
+
+    now = datetime.now(
+        TASHKENT_TIMEZONE
+    )
+
+    if proposed_datetime <= now:
+        await message.answer(
+            "That time has already passed.\n\n"
+            "Please choose a future time."
+        )
+        return
 
     # ========================================================
     # GET DATABASE USER
@@ -419,6 +515,7 @@ async def accept_schedule_handler(
     await callback.bot.send_message(
         chat_id=requester.telegram_id,
         text=requester_text,
+        reply_markup=get_schedule_accepted_keyboard(),
     )
 
     # ========================================================
@@ -430,13 +527,14 @@ async def accept_schedule_handler(
             scheduled_at=scheduled_at,
         )
     else:
-        recipient_text = match_scheduled_message(
+        recipient_text = schedule_accepted_confirmation_message(
             requester=requester,
             scheduled_at=scheduled_at,
         )
 
     await callback.message.edit_text(
-        recipient_text
+        recipient_text,
+        reply_markup=get_schedule_accepted_keyboard(),
     )
 
     await callback.answer()
@@ -544,6 +642,7 @@ async def reject_schedule_handler(
     await callback.bot.send_message(
         chat_id=requester.telegram_id,
         text=requester_text,
+        reply_markup=get_schedule_accepted_keyboard(),
     )
 
     # ========================================================
@@ -562,7 +661,8 @@ async def reject_schedule_handler(
         )
 
     await callback.message.edit_text(
-        recipient_text
+        recipient_text,
+        reply_markup=get_schedule_accepted_keyboard(),
     )
 
     await callback.answer()
