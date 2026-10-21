@@ -3,3 +3,5 @@ MAIN_MENU_RANKINGS = "Rankings"
 MAIN_MENU_MY_MATCHES = "My Matches"
 MAIN_MENU_FIND_OPPONENT = "Find Opponent"
 MAIN_MENU_BOOK_COURT = "Book Court"
+
+MAIN_MENU_ADMIN_PANEL = "Admin Panel"

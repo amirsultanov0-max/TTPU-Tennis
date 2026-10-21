@@ -1,3 +1,4 @@
+from decimal import Decimal
 from datetime import datetime
 
 from sqlalchemy import (
@@ -7,6 +8,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
 )
 from sqlalchemy.orm import (
@@ -135,6 +137,18 @@ class User(Base):
     )
 
     ranking_points: Mapped[int] = mapped_column(
+        Integer,
+        default=1000,
+        nullable=False,
+    )
+
+    elo_rating: Mapped[Decimal] = mapped_column(
+        Numeric(10, 6),
+        default=Decimal("1000.000000"),
+        nullable=False,
+    )
+
+    elo_matches_played: Mapped[int] = mapped_column(
         Integer,
         default=0,
         nullable=False,
@@ -326,6 +340,19 @@ class Match(Base):
             "users.id",
             name="fk_match_result_submitted_by",
         ),
+        nullable=True,
+    )
+
+    not_played_requested_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "users.id",
+            name="fk_match_not_played_requested_by",
+        ),
+        nullable=True,
+    )
+
+    not_played_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
     )
 
@@ -674,3 +701,46 @@ Index(
     ScheduleRequest.recipient_id,
     ScheduleRequest.status,
 )
+
+# ============================================================
+# ADMIN ROLE MODEL
+# ============================================================
+
+
+class AdminRole(Base):
+    __tablename__ = "admin_roles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    granted_by_telegram_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+        onupdate=func.now(), nullable=False
+    )
+
+
+# ============================================================
+# ADMIN AUDIT LOG MODEL
+# ============================================================
+
+
+class AdminAuditLog(Base):
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    details: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

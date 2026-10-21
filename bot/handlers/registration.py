@@ -8,7 +8,7 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from bot.keyboards.main_menu import get_main_menu_keyboard
+from bot.keyboards.main_menu import get_main_menu_keyboard_for_user
 from bot.keyboards.registration import (
     get_confirmation_keyboard,
     get_edit_keyboard,
@@ -411,7 +411,7 @@ async def confirm_registration(
             "👋 This Telegram account is already registered.\n\n"
             "You can continue using your existing "
             "TTPU Tennis profile.",
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=await get_main_menu_keyboard_for_user(telegram_id),
         )
 
         return
@@ -462,7 +462,7 @@ async def confirm_registration(
         "Your TTPU Tennis profile has been "
         "created successfully.\n\n"
         "🏆 Starting ranking points: 0",
-        reply_markup=get_main_menu_keyboard(),
+        reply_markup=await get_main_menu_keyboard_for_user(telegram_id),
     )
 
 

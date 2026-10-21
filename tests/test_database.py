@@ -1,6 +1,8 @@
 import asyncio
 import os
 
+import pytest
+
 from dotenv import load_dotenv
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -20,6 +22,7 @@ DATABASE_URL = DATABASE_URL.replace(
 )
 
 
+@pytest.mark.asyncio
 async def test_connection() -> None:
     engine = create_async_engine(DATABASE_URL)
 

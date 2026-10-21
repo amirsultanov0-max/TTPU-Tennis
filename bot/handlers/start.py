@@ -3,7 +3,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
-from bot.keyboards.main_menu import get_main_menu_keyboard
+from bot.keyboards.main_menu import get_main_menu_keyboard_for_user
 from bot.states.registration import RegistrationStates
 from bot.ui.messages.profile import profile_message
 from services.users import get_user_by_telegram_id
@@ -48,7 +48,7 @@ async def start_handler(
 
         await message.answer(
             profile_message(user, rank, total_players),
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=await get_main_menu_keyboard_for_user(telegram_id),
         )
 
         return

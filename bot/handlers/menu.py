@@ -1,15 +1,13 @@
 from aiogram import F, Router
 from aiogram.types import Message
 
-from bot.keyboards.main_menu import get_main_menu_keyboard
+from bot.keyboards.main_menu import get_main_menu_keyboard_for_user
 from bot.ui.components.buttons import (
     MAIN_MENU_BOOK_COURT,
-    MAIN_MENU_FIND_OPPONENT,
     MAIN_MENU_MY_PROFILE,
 )
 from bot.ui.messages.common import (
     book_court_message,
-    find_opponent_message,
     profile_not_found_message,
 )
 from bot.ui.messages.profile import profile_message
@@ -35,7 +33,7 @@ async def my_profile_handler(
     if not user:
         await message.answer(
             profile_not_found_message(),
-            reply_markup=get_main_menu_keyboard(),
+            reply_markup=await get_main_menu_keyboard_for_user(message.from_user.id),
         )
         return
 
@@ -43,21 +41,7 @@ async def my_profile_handler(
 
     await message.answer(
         profile_message(user, rank, total_players),
-        reply_markup=get_main_menu_keyboard(),
-    )
-
-
-@router.message(F.text == MAIN_MENU_FIND_OPPONENT)
-async def find_opponent_handler(
-    message: Message,
-) -> None:
-    """
-    Open the opponent search section.
-    """
-
-    await message.answer(
-        find_opponent_message(),
-        reply_markup=get_main_menu_keyboard(),
+        reply_markup=await get_main_menu_keyboard_for_user(message.from_user.id),
     )
 
 
@@ -71,5 +55,5 @@ async def book_court_handler(
 
     await message.answer(
         book_court_message(),
-        reply_markup=get_main_menu_keyboard(),
+        reply_markup=await get_main_menu_keyboard_for_user(message.from_user.id),
     )

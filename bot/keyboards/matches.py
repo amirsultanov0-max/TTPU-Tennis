@@ -200,7 +200,7 @@ def get_needs_action_keyboard(
                 InlineKeyboardButton(
                     text=f"#{match_id} Cancel Match",
                     callback_data=(
-                        f"matches:cancel:{match_id}"
+                        f"matches:cancel:needs_action:{match_id}"
                     ),
                 )
             ]
@@ -237,10 +237,29 @@ def get_needs_action_keyboard(
             [
                 InlineKeyboardButton(
                     text=f"#{match_id} Submit Result",
-                    callback_data=(
-                        f"matches:submit_result:{match_id}"
-                    ),
-                )
+                    callback_data=f"matches:submit_result:{match_id}",
+                ),
+                InlineKeyboardButton(
+                    text=f"#{match_id} Not Played",
+                    callback_data=f"matches:not_played:request:{match_id}",
+                ),
+            ]
+        )
+
+    elif action_type == "not_played_pending":
+        if match_id is None:
+            raise ValueError("match_id is required for not-played responses.")
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"#{match_id} Confirm",
+                    callback_data=f"matches:not_played:confirm:{match_id}",
+                ),
+                InlineKeyboardButton(
+                    text="No, we played",
+                    callback_data=f"matches:not_played:reject:{match_id}",
+                ),
             ]
         )
 
@@ -303,6 +322,7 @@ def get_result_reminder_keyboard(
 def get_match_actions_keyboard(
     match_id: int,
     status: str,
+    section: str = "upcoming",
 ) -> InlineKeyboardMarkup:
     """
     Return the available scheduling actions for a match.
@@ -341,7 +361,7 @@ def get_match_actions_keyboard(
                 InlineKeyboardButton(
                     text="Cancel match",
                     callback_data=(
-                        f"matches:cancel:{match_id}"
+                        f"matches:cancel:{section}:{match_id}"
                     ),
                 )
             ]
@@ -364,7 +384,7 @@ def get_match_actions_keyboard(
                 InlineKeyboardButton(
                     text="Cancel match",
                     callback_data=(
-                        f"matches:cancel:{match_id}"
+                        f"matches:cancel:{section}:{match_id}"
                     ),
                 )
             ]
@@ -464,6 +484,7 @@ def get_match_navigation_keyboard(
     actions = get_match_actions_keyboard(
         match_id=match_id,
         status=status,
+        section=section,
     )
 
     buttons.extend(

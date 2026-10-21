@@ -5,6 +5,8 @@ from aiogram import Bot, Dispatcher
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 
+from bot.handlers.admin import router as admin_router
+from bot.handlers.challenges import router as challenges_router
 from bot.handlers.matches import router as matches_router
 from bot.handlers.menu import router as menu_router
 from bot.handlers.rankings import router as rankings_router
@@ -28,9 +30,11 @@ if not BOT_TOKEN:
 
 dp = Dispatcher()
 
+dp.include_router(admin_router)
 dp.include_router(start_router)
 dp.include_router(registration_router)
 dp.include_router(menu_router)
+dp.include_router(challenges_router)
 dp.include_router(rankings_router)
 dp.include_router(matches_router)
 dp.include_router(scheduling_router)

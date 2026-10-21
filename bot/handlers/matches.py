@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 
 from aiogram import F, Router
@@ -13,6 +14,7 @@ from bot.keyboards.matches import (
     get_match_navigation_keyboard,
     get_result_actions_keyboard,
     get_my_matches_keyboard,
+    get_schedule_accepted_keyboard,
 )
 
 from bot.states.matches import MatchResultStates
@@ -34,8 +36,19 @@ from bot.ui.messages.matches import (
     format_needs_action_schedule,
     format_needs_action_schedule_proposal,
     format_needs_action_result,
+    format_needs_action_not_played,
     format_needs_action_confirmation,
     my_matches_message,
+    confirmed_result_message,
+    result_submission_message,
+    set_2_submission_message,
+    set_3_submission_message,
+    submitted_result_message,
+    score_format_error_message,
+    result_session_expired_message,
+    invalid_match_result_message,
+    score_parse_error_message,
+    invalid_set_score_message
 )
 
 
@@ -46,10 +59,16 @@ from services.matches import (
     get_player_match_stats,
     get_matches_for_user,
     get_pending_schedule_requests,
+    request_match_not_played,
+    confirm_match_not_played,
+    reject_match_not_played,
     submit_match_result,
 )
 from services.users import get_user_by_telegram_id
 from services.ranking import get_player_rank
+
+
+logger = logging.getLogger(__name__)
 
 
 router = Router()
@@ -240,6 +259,548 @@ async def my_matches_handler(
         reply_markup=get_my_matches_keyboard(),
     )
 
+
+
+
+
+
+@router.callback_query(
+    F.data.startswith("matches:confirm_result:")
+)
+async def confirm_result_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Confirm a submitted result and notify both players."""
+
+    match_id = int(callback.data.split(":")[2])
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+
+    if not user:
+        await callback.answer(
+            "Profile not found.",
+            show_alert=True,
+        )
+        return
+
+    try:
+        match = await confirm_match_result(
+            match_id=match_id,
+            confirmed_by_id=user.id,
+        )
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    winner = (
+        match.player_one
+        if match.winner_id == match.player_one_id
+        else match.player_two
+    )
+    loser = (
+        match.player_two
+        if match.winner_id == match.player_one_id
+        else match.player_one
+    )
+
+    result_text = (
+        "✅ RESULT CONFIRMED\n\n"
+        f"🎾 Match #{match.id}\n\n"
+        f"Set 1: {match.set_1_player_one_score}-"
+        f"{match.set_1_player_two_score}\n"
+        f"Set 2: {match.set_2_player_one_score}-"
+        f"{match.set_2_player_two_score}"
+    )
+
+    if (
+        match.set_3_player_one_score is not None
+        and match.set_3_player_two_score is not None
+    ):
+        result_text += (
+            f"\nSet 3: {match.set_3_player_one_score}-"
+            f"{match.set_3_player_two_score}"
+        )
+
+    result_text += (
+        "\n\n"
+        f"🏆 Winner: {winner.first_name} {winner.last_name}\n"
+        f"🎾 Loser: {loser.first_name} {loser.last_name}\n\n"
+        "The match has been completed."
+    )
+
+    # Update the confirming player's existing message.
+    await safe_edit_text(callback, result_text)
+    await callback.answer("Result confirmed.")
+
+    # Notify the other participant, regardless of who accepted
+    # the original challenge or submitted the result.
+    other_player = (
+        match.player_two
+        if match.player_one_id == user.id
+        else match.player_one
+    )
+
+    try:
+        await callback.bot.send_message(
+            chat_id=other_player.telegram_id,
+            text=result_text,
+        )
+    except Exception:
+        logger.exception(
+            "Could not notify the other player for match #%s",
+            match.id,
+        )
+
+
+
+def parse_set_score(text: str) -> tuple[int, int]:
+    """
+    Parse a set score entered as Player 1:Player 2.
+
+    Example:
+        6:4
+    """
+
+    value = text.strip()
+    parts = value.split(":")
+
+    if len(parts) != 2:
+        raise ValueError(
+            "Please enter the score in this format: 6:4"
+        )
+
+    player_one_text = parts[0].strip()
+    player_two_text = parts[1].strip()
+
+    if not (
+        player_one_text.isdigit()
+        and player_two_text.isdigit()
+    ):
+        raise ValueError(
+            "Scores must be numbers. Example: 6:4"
+        )
+
+    player_one_score = int(player_one_text)
+    player_two_score = int(player_two_text)
+
+    if player_one_score < 0 or player_two_score < 0:
+        raise ValueError(
+            "Scores cannot be negative."
+        )
+
+    return player_one_score, player_two_score
+
+
+async def _validate_and_parse_set_score(
+    message: Message,
+) -> tuple[int, int] | None:
+    """Parse and validate one tennis set score."""
+
+    try:
+        player_one_score, player_two_score = (
+            parse_set_score(message.text or "")
+        )
+    except ValueError as error:
+        await message.answer(
+            score_parse_error_message(str(error))
+        )
+        return None
+
+    from services.tennis_scoring import validate_set_score
+
+    try:
+        validate_set_score(
+            player_one_score=player_one_score,
+            player_two_score=player_two_score,
+        )
+    except ValueError as error:
+        await message.answer(
+            invalid_set_score_message(str(error))
+        )
+        return None
+
+    return player_one_score, player_two_score
+
+
+@router.callback_query(
+    F.data.startswith("matches:submit_result:")
+)
+async def submit_result_handler(
+    callback: CallbackQuery,
+    state,
+) -> None:
+    """Start the Best-of-3 match result submission flow."""
+
+    match_id = int(
+        callback.data.split(":")[2]
+    )
+
+    user = await get_user_by_telegram_id(
+        callback.from_user.id
+    )
+
+    if not user:
+        await callback.answer(
+            "Profile not found.",
+            show_alert=True,
+        )
+        return
+
+    match = await get_match_by_id(match_id)
+
+    if not match:
+        await callback.answer(
+            "Match not found.",
+            show_alert=True,
+        )
+        return
+
+    if user.id not in (
+        match.player_one_id,
+        match.player_two_id,
+    ):
+        await callback.answer(
+            "You are not a player in this match.",
+            show_alert=True,
+        )
+        return
+
+    if match.status != "scheduled":
+        await callback.answer(
+            "This match is not available for result submission.",
+            show_alert=True,
+        )
+        return
+
+    if match.result_status != "not_submitted":
+        await callback.answer(
+            "A result has already been submitted.",
+            show_alert=True,
+        )
+        return
+
+    if match.not_played_requested_by_id is not None:
+        await callback.answer(
+            "A not-played request is awaiting a response.",
+            show_alert=True,
+        )
+        return
+
+    await state.clear()
+
+    await state.update_data(
+        match_id=match_id,
+        submitted_by_id=user.id,
+    )
+
+    await state.set_state(
+        MatchResultStates.waiting_for_set_1_score
+    )
+
+    await callback.message.answer(
+        result_submission_message(match)
+    )
+
+    await callback.answer()
+
+
+@router.message(
+    MatchResultStates.waiting_for_set_1_score
+)
+async def set_1_score_handler(
+    message: Message,
+    state,
+) -> None:
+    """Receive and validate Set 1."""
+
+    result = await _validate_and_parse_set_score(message)
+
+    if result is None:
+        return
+
+    player_one_score, player_two_score = result
+
+    await state.update_data(
+        set_1_player_one_score=player_one_score,
+        set_1_player_two_score=player_two_score,
+    )
+
+    await state.set_state(
+        MatchResultStates.waiting_for_set_2_score
+    )
+
+    await message.answer(
+        set_2_submission_message(
+            player_one_score=player_one_score,
+            player_two_score=player_two_score,
+        )
+    )
+
+
+@router.message(
+    MatchResultStates.waiting_for_set_2_score
+)
+async def set_2_score_handler(
+    message: Message,
+    state,
+) -> None:
+    """Receive and validate Set 2."""
+
+    result = await _validate_and_parse_set_score(message)
+
+    if result is None:
+        return
+
+    player_one_score, player_two_score = result
+
+    data = await state.get_data()
+
+    set_1_player_one_score = data.get(
+        "set_1_player_one_score"
+    )
+    set_1_player_two_score = data.get(
+        "set_1_player_two_score"
+    )
+
+    if (
+        set_1_player_one_score is None
+        or set_1_player_two_score is None
+    ):
+        await state.clear()
+
+        await message.answer(
+            result_session_expired_message()
+        )
+        return
+
+    await state.update_data(
+        set_2_player_one_score=player_one_score,
+        set_2_player_two_score=player_two_score,
+    )
+
+    from services.tennis_scoring import get_match_winner
+
+    try:
+        match_winner = get_match_winner(
+            set_1_player_one_score=set_1_player_one_score,
+            set_1_player_two_score=set_1_player_two_score,
+            set_2_player_one_score=player_one_score,
+            set_2_player_two_score=player_two_score,
+        )
+    except ValueError as error:
+        await message.answer(
+            invalid_match_result_message(str(error))
+        )
+        return
+
+    if match_winner is not None:
+        await _finalize_result_submission(
+            message=message,
+            state=state,
+        )
+        return
+
+    await state.set_state(
+        MatchResultStates.waiting_for_set_3_score
+    )
+
+    await message.answer(
+        set_3_submission_message(
+            set_1_player_one_score=set_1_player_one_score,
+            set_1_player_two_score=set_1_player_two_score,
+            set_2_player_one_score=player_one_score,
+            set_2_player_two_score=player_two_score,
+        )
+    )
+
+
+@router.message(
+    MatchResultStates.waiting_for_set_3_score
+)
+async def set_3_score_handler(
+    message: Message,
+    state,
+) -> None:
+    """Receive and validate Set 3."""
+
+    result = await _validate_and_parse_set_score(message)
+
+    if result is None:
+        return
+
+    player_one_score, player_two_score = result
+
+    data = await state.get_data()
+
+    set_1_player_one_score = data.get(
+        "set_1_player_one_score"
+    )
+    set_1_player_two_score = data.get(
+        "set_1_player_two_score"
+    )
+    set_2_player_one_score = data.get(
+        "set_2_player_one_score"
+    )
+    set_2_player_two_score = data.get(
+        "set_2_player_two_score"
+    )
+
+    if (
+        set_1_player_one_score is None
+        or set_1_player_two_score is None
+        or set_2_player_one_score is None
+        or set_2_player_two_score is None
+    ):
+        await state.clear()
+
+        await message.answer(
+            result_session_expired_message()
+        )
+        return
+
+    await state.update_data(
+        set_3_player_one_score=player_one_score,
+        set_3_player_two_score=player_two_score,
+    )
+
+    await _finalize_result_submission(
+        message=message,
+        state=state,
+    )
+
+
+async def _finalize_result_submission(
+    message: Message,
+    state,
+) -> None:
+    """Submit the complete Best-of-3 result for confirmation."""
+
+    data = await state.get_data()
+
+    match_id = data.get("match_id")
+    submitted_by_id = data.get("submitted_by_id")
+
+    set_1_player_one_score = data.get(
+        "set_1_player_one_score"
+    )
+    set_1_player_two_score = data.get(
+        "set_1_player_two_score"
+    )
+    set_2_player_one_score = data.get(
+        "set_2_player_one_score"
+    )
+    set_2_player_two_score = data.get(
+        "set_2_player_two_score"
+    )
+    set_3_player_one_score = data.get(
+        "set_3_player_one_score"
+    )
+    set_3_player_two_score = data.get(
+        "set_3_player_two_score"
+    )
+
+    if (
+        match_id is None
+        or submitted_by_id is None
+        or set_1_player_one_score is None
+        or set_1_player_two_score is None
+        or set_2_player_one_score is None
+        or set_2_player_two_score is None
+    ):
+        await state.clear()
+
+        await message.answer(
+            result_session_expired_message()
+        )
+        return
+
+    try:
+        match = await submit_match_result(
+            match_id=match_id,
+            submitted_by_id=submitted_by_id,
+            set_1_player_one_score=set_1_player_one_score,
+            set_1_player_two_score=set_1_player_two_score,
+            set_2_player_one_score=set_2_player_one_score,
+            set_2_player_two_score=set_2_player_two_score,
+            set_3_player_one_score=set_3_player_one_score,
+            set_3_player_two_score=set_3_player_two_score,
+        )
+    except ValueError as error:
+        await message.answer(
+            str(error)
+        )
+        return
+
+    await state.clear()
+
+    await message.answer(
+        submitted_result_message(
+            match_id=match.id,
+            set_1_player_one_score=set_1_player_one_score,
+            set_1_player_two_score=set_1_player_two_score,
+            set_2_player_one_score=set_2_player_one_score,
+            set_2_player_two_score=set_2_player_two_score,
+            set_3_player_one_score=set_3_player_one_score,
+            set_3_player_two_score=set_3_player_two_score,
+        )
+    )
+
+    submitter = (
+        match.player_one
+        if match.player_one_id == submitted_by_id
+        else match.player_two
+    )
+    opponent = (
+        match.player_two
+        if match.player_one_id == submitted_by_id
+        else match.player_one
+    )
+
+    score_lines = [
+        (
+            f"Set 1: {set_1_player_one_score}–"
+            f"{set_1_player_two_score}"
+        ),
+        (
+            f"Set 2: {set_2_player_one_score}–"
+            f"{set_2_player_two_score}"
+        ),
+    ]
+
+    if (
+        set_3_player_one_score is not None
+        and set_3_player_two_score is not None
+    ):
+        score_lines.append(
+            f"Set 3: {set_3_player_one_score}–"
+            f"{set_3_player_two_score}"
+        )
+
+    notification_text = (
+        f"🎾 Match #{match.id}\n\n"
+        f"{submitter.first_name} {submitter.last_name} "
+        "submitted the result.\n\n"
+        + "\n".join(score_lines)
+        + "\n\nPlease confirm the result:"
+    )
+
+    try:
+        await message.bot.send_message(
+            chat_id=opponent.telegram_id,
+            text=notification_text,
+            reply_markup=get_result_actions_keyboard(
+                match.id,
+                match.result_status,
+                can_confirm=True,
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Could not notify Telegram user %s about submitted result for match %s",
+            opponent.telegram_id,
+            match.id,
+            exc_info=True,
+        )
 
 
 @router.callback_query(
@@ -841,13 +1402,31 @@ async def _show_needs_action_page(
 
         if (
             match.status == "scheduled"
-            and match.scheduled_at
-            and match.scheduled_at <= now
-            and match.result_status == "not_submitted"
+            and match.not_played_requested_by_id is not None
         ):
             action_items.append(
                 (
-                    match.scheduled_at,
+                    match.not_played_requested_at or match.scheduled_at or match.created_at,
+                    "not_played_pending",
+                    match,
+                )
+            )
+            continue
+
+        scheduled_at = match.scheduled_at
+        if scheduled_at and scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+
+        if (
+            match.status == "scheduled"
+            and scheduled_at
+            and scheduled_at <= now
+            and match.result_status == "not_submitted"
+            and match.result_submitted_by_id is None
+        ):
+            action_items.append(
+                (
+                    scheduled_at,
                     "result",
                     match,
                 )
@@ -901,7 +1480,6 @@ async def _show_needs_action_page(
     ]
 
     keyboard_rows = []
-    result_button_row = []
 
     for _, action_type, item in page_items:
 
@@ -945,6 +1523,22 @@ async def _show_needs_action_page(
                 match_id=item.id,
             )
 
+        elif action_type == "not_played_pending":
+            message_parts.append(
+                format_needs_action_not_played(
+                    item,
+                    user.id,
+                )
+            )
+
+            if item.not_played_requested_by_id == user.id:
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+            else:
+                keyboard = get_needs_action_keyboard(
+                    action_type="not_played_pending",
+                    match_id=item.id,
+                )
+
         elif action_type == "confirmation":
             message_parts.append(
                 format_needs_action_confirmation(
@@ -963,21 +1557,7 @@ async def _show_needs_action_page(
 
         message_parts.append("")
 
-        if action_type == "result":
-            result_button_row.extend(
-                keyboard.inline_keyboard[0]
-            )
-
-            if len(result_button_row) == 2:
-                keyboard_rows.append(result_button_row)
-                result_button_row = []
-        else:
-            keyboard_rows.extend(
-                keyboard.inline_keyboard
-            )
-
-    if result_button_row:
-        keyboard_rows.append(result_button_row)
+        keyboard_rows.extend(keyboard.inline_keyboard)
 
     navigation = []
 
@@ -1018,6 +1598,194 @@ async def _show_needs_action_page(
     )
 
     await callback.answer()
+
+
+# ============================================================
+# MATCH NOT-PLAYED REQUESTS
+# ============================================================
+
+
+@router.callback_query(F.data.startswith("matches:not_played:request:"))
+async def request_match_not_played_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Ask the opponent to confirm that a scheduled match was not played."""
+
+    try:
+        match_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid match request.", show_alert=True)
+        return
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        await callback.answer(profile_not_found_message(), show_alert=True)
+        return
+
+    try:
+        match = await request_match_not_played(match_id, user.id)
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    requester = (
+        match.player_one
+        if match.player_one_id == user.id
+        else match.player_two
+    )
+    opponent = (
+        match.player_two
+        if match.player_one_id == user.id
+        else match.player_one
+    )
+
+    scheduled_text = (
+        match.scheduled_at.strftime("%b %d, %H:%M")
+        if match.scheduled_at
+        else "time not set"
+    )
+
+    try:
+        await callback.bot.send_message(
+            chat_id=opponent.telegram_id,
+            text=(
+                f"Match #{match.id}: Please respond\n\n"
+                f"{requester.first_name} {requester.last_name} says "
+                "this match wasn't played.\n"
+                f"Scheduled: {scheduled_text}\n\n"
+                "Please confirm the match wasn't played:"
+            ),
+            reply_markup=get_needs_action_keyboard(
+                action_type="not_played_pending",
+                match_id=match.id,
+            ),
+        )
+    except Exception:
+        logger.warning(
+            "Could not notify Telegram user %s about not-played request for match %s",
+            opponent.telegram_id,
+            match.id,
+            exc_info=True,
+        )
+
+    await safe_edit_text(
+        callback,
+        f"Not Played request sent for Match #{match.id}.\n\n"
+        "Waiting for your opponent to respond.",
+        reply_markup=get_schedule_accepted_keyboard(),
+    )
+    await callback.answer("Request sent.")
+
+
+@router.callback_query(F.data.startswith("matches:not_played:confirm:"))
+async def confirm_match_not_played_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Confirm the opponent's not-played request."""
+
+    try:
+        match_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid match request.", show_alert=True)
+        return
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        await callback.answer(profile_not_found_message(), show_alert=True)
+        return
+
+    try:
+        match = await confirm_match_not_played(match_id, user.id)
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    text = (
+        f"Match #{match.id} was marked as not played and cancelled.\n\n"
+        f"{match.player_one.first_name} {match.player_one.last_name} "
+        f"vs {match.player_two.first_name} {match.player_two.last_name}\n\n"
+        "No result or ranking points were recorded."
+    )
+
+    await safe_edit_text(
+        callback,
+        text,
+        reply_markup=get_schedule_accepted_keyboard(),
+    )
+
+    for player in (match.player_one, match.player_two):
+        if player.telegram_id == callback.from_user.id:
+            continue
+        try:
+            await callback.bot.send_message(
+                chat_id=player.telegram_id,
+                text=text,
+                reply_markup=get_schedule_accepted_keyboard(),
+            )
+        except Exception:
+            logger.warning(
+                "Could not notify Telegram user %s about not-played confirmation for match %s",
+                player.telegram_id,
+                match.id,
+                exc_info=True,
+            )
+
+    await callback.answer("Match cancelled.")
+
+
+@router.callback_query(F.data.startswith("matches:not_played:reject:"))
+async def reject_match_not_played_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Reject the opponent's not-played request."""
+
+    try:
+        match_id = int(callback.data.rsplit(":", 1)[1])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid match request.", show_alert=True)
+        return
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        await callback.answer(profile_not_found_message(), show_alert=True)
+        return
+
+    try:
+        match = await reject_match_not_played(match_id, user.id)
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    # Both players are told the request was rejected.
+    text = (
+        f"The not-played request for match #{match.id} was rejected.\n\n"
+        "The match remains scheduled. If you played, submit the result in My Matches."
+    )
+
+    await safe_edit_text(
+        callback,
+        text,
+        reply_markup=get_schedule_accepted_keyboard(),
+    )
+
+    for player in (match.player_one, match.player_two):
+        if player.telegram_id == callback.from_user.id:
+            continue
+        try:
+            await callback.bot.send_message(
+                chat_id=player.telegram_id,
+                text=text,
+                reply_markup=get_schedule_accepted_keyboard(),
+            )
+        except Exception:
+            logger.warning(
+                "Could not notify Telegram user %s about rejected not-played request for match %s",
+                player.telegram_id,
+                match.id,
+                exc_info=True,
+            )
+
+    await callback.answer("Request rejected.")
 
 
 # ============================================================
@@ -1413,3 +2181,210 @@ async def view_match_handler(
 
         await callback.answer()
         return
+
+# ============================================================
+# MATCH CANCELLATION
+# ============================================================
+
+
+@router.callback_query(
+    F.data.startswith("matches:cancel:")
+)
+async def cancel_match_prompt_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Ask the player to confirm match cancellation."""
+
+    parts = callback.data.split(":")
+    section = parts[2] if len(parts) == 4 else None
+    match_id = int(parts[-1])
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        await callback.answer(profile_not_found_message(), show_alert=True)
+        return
+
+    match = await get_match_by_id(match_id)
+    if not match:
+        await callback.answer(match_not_found_message(), show_alert=True)
+        return
+
+    if user.id not in (match.player_one_id, match.player_two_id):
+        await callback.answer(not_match_player_message(), show_alert=True)
+        return
+
+    if match.status not in ("awaiting_schedule", "scheduled"):
+        await callback.answer(
+            "This match can no longer be cancelled.",
+            show_alert=True,
+        )
+        return
+
+    section = section or (
+        "upcoming" if match.status == "scheduled" else "needs_action"
+    )
+
+    await safe_edit_text(
+        callback,
+        f"Cancel match #{match.id}?\n\n"
+        f"{match.player_one.first_name} {match.player_one.last_name} "
+        f"vs {match.player_two.first_name} {match.player_two.last_name}\n\n"
+        "This action cannot be undone.",
+        reply_markup=get_cancel_confirmation_keyboard(
+            match_id=match.id,
+            section=section,
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    F.data.startswith("matches:confirm_cancel:")
+)
+async def confirm_cancel_match_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Cancel a match after explicit confirmation."""
+
+    parts = callback.data.split(":")
+    if len(parts) == 4:
+        section = parts[2]
+        raw_match_id = parts[3]
+    elif len(parts) == 3:
+        # Compatibility with older Telegram buttons.
+        section = None
+        raw_match_id = parts[2]
+    else:
+        await callback.answer(
+            "Invalid cancellation button.",
+            show_alert=True,
+        )
+        return
+
+    match_id = int(raw_match_id)
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        await callback.answer(profile_not_found_message(), show_alert=True)
+        return
+
+    match = await get_match_by_id(match_id)
+    if not match:
+        await callback.answer(match_not_found_message(), show_alert=True)
+        return
+
+    if user.id not in (match.player_one_id, match.player_two_id):
+        await callback.answer(not_match_player_message(), show_alert=True)
+        return
+
+    section = section or (
+        "upcoming" if match.status == "scheduled" else "needs_action"
+    )
+
+    try:
+        match = await cancel_match(match_id=match_id, user_id=user.id)
+    except ValueError as error:
+        await callback.answer(str(error), show_alert=True)
+        return
+
+    await safe_edit_text(
+        callback,
+        f"🚫 Match #{match.id} cancelled.\n\n"
+        f"{match.player_one.first_name} {match.player_one.last_name} "
+        f"vs {match.player_two.first_name} {match.player_two.last_name}",
+        reply_markup=get_schedule_accepted_keyboard(),
+    )
+
+    for player in (match.player_one, match.player_two):
+        try:
+            await callback.bot.send_message(
+                chat_id=player.telegram_id,
+                text=(
+                    f"🚫 Match #{match.id} has been cancelled.\n\n"
+                    f"{match.player_one.first_name} {match.player_one.last_name} "
+                    f"vs {match.player_two.first_name} {match.player_two.last_name}"
+                ),
+                reply_markup=get_schedule_accepted_keyboard(),
+            )
+        except Exception:
+            # The cancellation is committed; log notification failures.
+            logger.warning(
+                "Could not notify Telegram user %s about cancelled match %s",
+                player.telegram_id,
+                match.id,
+                exc_info=True,
+            )
+
+    await callback.answer("Match cancelled.")
+
+
+@router.callback_query(
+    F.data.startswith("matches:keep:")
+)
+async def keep_match_handler(
+    callback: CallbackQuery,
+) -> None:
+    """Dismiss cancellation confirmation and return to the match."""
+
+    parts = callback.data.split(":")
+    if len(parts) == 4:
+        section = parts[2]
+        raw_match_id = parts[3]
+    elif len(parts) == 3:
+        # Compatibility with older Telegram buttons.
+        section = None
+        raw_match_id = parts[2]
+    else:
+        await callback.answer(
+            "Invalid cancellation button.",
+            show_alert=True,
+        )
+        return
+
+    match_id = int(raw_match_id)
+
+    user = await get_user_by_telegram_id(callback.from_user.id)
+    if not user:
+        await callback.answer(profile_not_found_message(), show_alert=True)
+        return
+
+    match = await get_match_by_id(match_id)
+    if not match:
+        await callback.answer(match_not_found_message(), show_alert=True)
+        return
+
+    if user.id not in (match.player_one_id, match.player_two_id):
+        await callback.answer(not_match_player_message(), show_alert=True)
+        return
+
+    section = section or (
+        "upcoming" if match.status == "scheduled" else "needs_action"
+    )
+
+    if section == "upcoming" and match.status == "scheduled":
+        opponent = (
+            match.player_two if match.player_one_id == user.id
+            else match.player_one
+        )
+        opponent_rank, _ = await get_player_rank(opponent.id)
+        opponent_streak, _ = await get_player_match_stats(opponent.id)
+        text = format_upcoming_match_detail(
+            match=match,
+            user_id=user.id,
+            opponent_rank=opponent_rank,
+            opponent_streak=opponent_streak,
+        )
+    else:
+        section = "needs_action"
+        text = format_match_message(match=match, user_id=user.id)
+
+    await safe_edit_text(
+        callback,
+        text,
+        reply_markup=get_match_navigation_keyboard(
+            match_id=match.id,
+            section=section,
+            status=match.status,
+        ),
+    )
+    await callback.answer("Match kept.")

@@ -58,6 +58,20 @@ async def get_user_by_telegram_id(
         return result.scalar_one_or_none()
 
 
+async def get_user_by_id(
+    user_id: int,
+) -> User | None:
+    """Get a user profile by database ID."""
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User)
+            .options(selectinload(User.group))
+            .where(User.id == user_id)
+        )
+        return result.scalar_one_or_none()
+
+
 async def get_user_by_student_id(
     student_id: str,
 ) -> User | None:
@@ -155,7 +169,7 @@ async def create_user(
                 group_id=group.id,
                 student_id=student_id,
                 phone=phone,
-                ranking_points=0,
+                ranking_points=1000,
                 wins=0,
                 losses=0,
             )
@@ -201,6 +215,8 @@ async def get_other_users(
                 User.id != user_id
             )
             .order_by(
+                User.ranking_points.desc(),
+                User.wins.desc(),
                 User.first_name.asc(),
                 User.last_name.asc(),
             )

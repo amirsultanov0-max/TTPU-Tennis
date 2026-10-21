@@ -1,3 +1,6 @@
+from bot.ui.components.formatting import format_match_datetime
+
+
 def schedule_match_message() -> str:
     return (
         "📅 Choose a date\n\n"
@@ -48,7 +51,7 @@ def schedule_request_sent_message(
     return (
         "\U0001F4E8 Schedule request sent\n\n"
         "\U0001F3BE Match time\n\n"
-        f"{scheduled_at:%B %-d, %Y} · {scheduled_at:%H:%M}\n\n"
+        f"{format_match_datetime(scheduled_at, '%B %-d, %Y')} · {format_match_datetime(scheduled_at, '%H:%M')}\n\n"
         f"Waiting for {opponent.first_name} "
         f"{opponent.last_name} to respond."
     )
@@ -60,8 +63,8 @@ def schedule_change_sent_message(
 ) -> str:
     return (
         "📨 Schedule Change Sent\n\n"
-        f"🎾 {scheduled_at:%B %-d, %Y} · "
-        f"{scheduled_at:%H:%M}\n\n"
+        f"🎾 {format_match_datetime(scheduled_at, '%B %-d, %Y')} · "
+        f"{format_match_datetime(scheduled_at, '%H:%M')}\n\n"
         f"Waiting for {opponent.first_name} "
         f"{opponent.last_name}.\n\n"
         "Your current time stays unchanged until they accept."
@@ -75,7 +78,7 @@ def schedule_request_message(
     return (
         "📨 Schedule request\n\n"
         f"🎾 {requester.first_name} {requester.last_name} proposed:\n\n"
-        f"{scheduled_at:%B %-d, %Y} · {scheduled_at:%H:%M}\n\n"
+        f"{format_match_datetime(scheduled_at, '%B %-d, %Y')} · {format_match_datetime(scheduled_at, '%H:%M')}\n\n"
         "Would you like to play at this time?"
     )
 
@@ -88,7 +91,7 @@ def schedule_change_request_message(
         "📨 Schedule Change\n\n"
         f"🎾 {requester.first_name} {requester.last_name} "
         "proposed:\n\n"
-        f"{scheduled_at:%B %-d, %Y} · {scheduled_at:%H:%M}\n\n"
+        f"{format_match_datetime(scheduled_at, '%B %-d, %Y')} · {format_match_datetime(scheduled_at, '%H:%M')}\n\n"
         "Your current time stays unchanged until you accept."
     )
 
@@ -99,8 +102,8 @@ def match_scheduled_message(
 ) -> str:
     return (
         "🎉 Match Scheduled\n\n"
-        f"📅 {scheduled_at:%B %-d, %Y} · "
-        f"{scheduled_at:%H:%M}\n\n"
+        f"📅 {format_match_datetime(scheduled_at, '%B %-d, %Y')} · "
+        f"{format_match_datetime(scheduled_at, '%H:%M')}\n\n"
         "See you on court! 🎾"
     )
 
@@ -113,7 +116,7 @@ def schedule_accepted_confirmation_message(
         "✅ Match scheduled\n\n"
         f"You accepted {requester.first_name} "
         f"{requester.last_name}'s proposal.\n\n"
-        f"{scheduled_at:%B %-d, %Y} · {scheduled_at:%H:%M}"
+        f"{format_match_datetime(scheduled_at, '%B %-d, %Y')} · {format_match_datetime(scheduled_at, '%H:%M')}"
     )
 
 
@@ -122,8 +125,8 @@ def schedule_change_accepted_message(
 ) -> str:
     return (
         "🎉 Match Scheduled\n\n"
-        f"📅 {scheduled_at:%B %-d, %Y} · "
-        f"{scheduled_at:%H:%M}\n\n"
+        f"📅 {format_match_datetime(scheduled_at, '%B %-d, %Y')} · "
+        f"{format_match_datetime(scheduled_at, '%H:%M')}\n\n"
         "See you on court! 🎾"
     )
 
@@ -136,7 +139,7 @@ def schedule_request_rejected_message(
         "↩️ Schedule request declined\n\n"
         f"{opponent.first_name} {opponent.last_name} "
         "declined your proposed time.\n\n"
-        f"{proposed_at:%B %-d, %Y} · {proposed_at:%H:%M}\n\n"
+        f"{format_match_datetime(proposed_at, '%B %-d, %Y')} · {format_match_datetime(proposed_at, '%H:%M')}\n\n"
         "You can propose another time."
     )
 
@@ -150,6 +153,6 @@ def schedule_change_rejected_message(
         f"{opponent.first_name} {opponent.last_name} "
         "rejected your new proposed time.\n\n"
         "Your current match time remains unchanged.\n\n"
-        f"{current_scheduled_at:%B %-d, %Y} · "
-        f"{current_scheduled_at:%H:%M}"
+        f"{format_match_datetime(current_scheduled_at, '%B %-d, %Y')} · "
+        f"{format_match_datetime(current_scheduled_at, '%H:%M')}"
     )

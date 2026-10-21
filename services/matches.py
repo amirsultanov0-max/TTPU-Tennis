@@ -442,9 +442,17 @@ async def submit_match_result(
                 "Only scheduled matches can receive a result."
             )
 
-        if match.result_status != RESULT_STATUS_NOT_SUBMITTED:
+        if (
+            match.result_status != RESULT_STATUS_NOT_SUBMITTED
+            or match.result_submitted_by_id is not None
+        ):
             raise ValueError(
                 "A result has already been submitted for this match."
+            )
+
+        if match.not_played_requested_by_id is not None:
+            raise ValueError(
+                "A not-played request is awaiting a response."
             )
 
         if not match.scheduled_at:
@@ -524,11 +532,13 @@ async def confirm_match_result(
         - record played_at
         - mark result confirmed
 
-    Ranking points are intentionally not modified here because
-    the project does not yet define the ranking-point formula.
+    Update Elo ratings and ranking points only after the
+    opponent confirms a valid result. Rating changes are committed
+    atomically with match completion and player statistics.
     """
 
     from services.tennis_scoring import get_match_winner
+    from services.elo import apply_confirmed_match_rating
 
     async with AsyncSessionLocal() as session:
 
@@ -537,6 +547,7 @@ async def confirm_match_result(
             .options(
                 selectinload(Match.player_one),
                 selectinload(Match.player_two),
+                selectinload(Match.result_submitted_by),
             )
             .where(
                 Match.id == match_id
@@ -557,6 +568,11 @@ async def confirm_match_result(
         ):
             raise ValueError(
                 "You are not a player in this match."
+            )
+
+        if match.status != MATCH_STATUS_SCHEDULED:
+            raise ValueError(
+                "Only scheduled matches can have their result confirmed."
             )
 
         if match.result_status != (
@@ -633,15 +649,26 @@ async def confirm_match_result(
         # Load both players
         # ----------------------------------------------------
 
-        player_one = await session.get(
-            User,
-            match.player_one_id,
+        # Lock both player rows in a stable order so concurrent
+        # match confirmations cannot overwrite each other's updates.
+        player_ids = sorted(
+            (match.player_one_id, match.player_two_id)
         )
 
-        player_two = await session.get(
-            User,
-            match.player_two_id,
+        locked_players_result = await session.execute(
+            select(User)
+            .where(User.id.in_(player_ids))
+            .order_by(User.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
+        locked_players = {
+            player.id: player
+            for player in locked_players_result.scalars().all()
+        }
+
+        player_one = locked_players.get(match.player_one_id)
+        player_two = locked_players.get(match.player_two_id)
 
         if not player_one or not player_two:
             raise ValueError(
@@ -675,6 +702,18 @@ async def confirm_match_result(
         else:
             player_two.wins += 1
             player_one.losses += 1
+
+        # ----------------------------------------------
+        # Update Elo ratings in the same transaction
+        # ----------------------------------------------
+
+        await apply_confirmed_match_rating(
+            session=session,
+            match=match,
+            player_a=player_one,
+            player_b=player_two,
+            winner=match_winner,
+        )
 
         await session.commit()
         await session.refresh(match)
@@ -717,6 +756,7 @@ async def cancel_match(
             .where(
                 Match.id == match_id
             )
+            .with_for_update()
         )
 
         match = result.scalar_one_or_none()
@@ -752,6 +792,14 @@ async def cancel_match(
                 "This match cannot be cancelled."
             )
 
+        if (
+            match.result_status != RESULT_STATUS_NOT_SUBMITTED
+            or match.result_submitted_by_id is not None
+        ):
+            raise ValueError(
+                "A match with a submitted result cannot be cancelled."
+            )
+
         pending_requests_result = await session.execute(
             select(ScheduleRequest).where(
                 ScheduleRequest.match_id == match_id,
@@ -767,10 +815,166 @@ async def cancel_match(
             request.status = SCHEDULE_REQUEST_REJECTED
 
         match.status = MATCH_STATUS_CANCELLED
+        match.not_played_requested_by_id = None
+        match.not_played_requested_at = None
 
         await session.commit()
         await session.refresh(match)
 
+        return match
+
+
+# ============================================================
+# MATCH NOT-PLAYED REQUESTS
+# ============================================================
+
+
+async def request_match_not_played(
+    match_id: int,
+    user_id: int,
+) -> Match:
+    """Record a request to cancel a scheduled match that was not played."""
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Match)
+            .options(
+                selectinload(Match.player_one),
+                selectinload(Match.player_two),
+            )
+            .where(Match.id == match_id)
+            .with_for_update()
+        )
+        match = result.scalar_one_or_none()
+
+        if not match:
+            raise ValueError("Match not found.")
+
+        if user_id not in (match.player_one_id, match.player_two_id):
+            raise ValueError("You are not a player in this match.")
+
+        if match.status != MATCH_STATUS_SCHEDULED:
+            raise ValueError("Only scheduled matches can use this request.")
+
+        if not match.scheduled_at:
+            raise ValueError("This match has no scheduled date and time.")
+
+        scheduled_at = match.scheduled_at
+        if scheduled_at.tzinfo is None:
+            scheduled_at = scheduled_at.replace(tzinfo=timezone.utc)
+
+        if scheduled_at > datetime.now(timezone.utc):
+            raise ValueError("This match has not reached its scheduled time yet.")
+
+        if (
+            match.result_status != RESULT_STATUS_NOT_SUBMITTED
+            or match.result_submitted_by_id is not None
+        ):
+            raise ValueError("A result has already been submitted for this match.")
+
+        if match.not_played_requested_by_id is not None:
+            raise ValueError("A not-played request is already pending.")
+
+        match.not_played_requested_by_id = user_id
+        match.not_played_requested_at = datetime.now(timezone.utc)
+
+        await session.commit()
+        await session.refresh(match)
+        return match
+
+
+async def confirm_match_not_played(
+    match_id: int,
+    user_id: int,
+) -> Match:
+    """Confirm the opponent's request and cancel the match."""
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Match)
+            .options(
+                selectinload(Match.player_one),
+                selectinload(Match.player_two),
+            )
+            .where(Match.id == match_id)
+            .with_for_update()
+        )
+        match = result.scalar_one_or_none()
+
+        if not match:
+            raise ValueError("Match not found.")
+
+        if user_id not in (match.player_one_id, match.player_two_id):
+            raise ValueError("You are not a player in this match.")
+
+        if match.not_played_requested_by_id is None:
+            raise ValueError("There is no pending not-played request.")
+
+        if match.not_played_requested_by_id == user_id:
+            raise ValueError("You cannot respond to your own request.")
+
+        if match.status != MATCH_STATUS_SCHEDULED:
+            raise ValueError("This match is no longer scheduled.")
+
+        if (
+            match.result_status != RESULT_STATUS_NOT_SUBMITTED
+            or match.result_submitted_by_id is not None
+        ):
+            raise ValueError("A result has already been submitted for this match.")
+
+        match.status = MATCH_STATUS_CANCELLED
+        match.not_played_requested_by_id = None
+        match.not_played_requested_at = None
+
+        await session.commit()
+        await session.refresh(match)
+        return match
+
+
+async def reject_match_not_played(
+    match_id: int,
+    user_id: int,
+) -> Match:
+    """Reject the opponent's request and keep the match scheduled."""
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Match)
+            .options(
+                selectinload(Match.player_one),
+                selectinload(Match.player_two),
+            )
+            .where(Match.id == match_id)
+            .with_for_update()
+        )
+        match = result.scalar_one_or_none()
+
+        if not match:
+            raise ValueError("Match not found.")
+
+        if user_id not in (match.player_one_id, match.player_two_id):
+            raise ValueError("You are not a player in this match.")
+
+        if match.not_played_requested_by_id is None:
+            raise ValueError("There is no pending not-played request.")
+
+        if match.not_played_requested_by_id == user_id:
+            raise ValueError("You cannot respond to your own request.")
+
+        if match.status != MATCH_STATUS_SCHEDULED:
+            raise ValueError("This match is no longer scheduled.")
+
+        if (
+            match.result_status != RESULT_STATUS_NOT_SUBMITTED
+            or match.result_submitted_by_id is not None
+        ):
+            raise ValueError("A result has already been submitted for this match.")
+
+        match.not_played_requested_by_id = None
+        match.not_played_requested_at = None
+
+        await session.commit()
+        await session.refresh(match)
         return match
 
 
@@ -832,9 +1036,9 @@ async def _create_schedule_request(
     async with AsyncSessionLocal() as session:
 
         match_result = await session.execute(
-            select(Match).where(
-                Match.id == match_id
-            )
+            select(Match)
+            .where(Match.id == match_id)
+            .with_for_update()
         )
 
         match = match_result.scalar_one_or_none()
@@ -977,29 +1181,49 @@ async def accept_schedule_request(
     """
 
     async with AsyncSessionLocal() as session:
-
-        result = await session.execute(
-            select(ScheduleRequest)
-            .options(
-                selectinload(ScheduleRequest.match),
-                selectinload(ScheduleRequest.requested_by),
-                selectinload(ScheduleRequest.recipient),
-            )
-            .where(
+        initial_result = await session.execute(
+            select(ScheduleRequest.match_id).where(
                 ScheduleRequest.id == request_id,
                 ScheduleRequest.recipient_id == user_id,
                 ScheduleRequest.status == SCHEDULE_REQUEST_PENDING,
             )
         )
+        match_id = initial_result.scalar_one_or_none()
 
-        schedule_request = result.scalar_one_or_none()
+        if match_id is None:
+            raise ValueError(
+                "Schedule request not found or no longer pending."
+            )
+
+        match_result = await session.execute(
+            select(Match)
+            .where(Match.id == match_id)
+            .with_for_update()
+        )
+        match = match_result.scalar_one_or_none()
+
+        if not match:
+            raise ValueError("Match not found.")
+
+        request_result = await session.execute(
+            select(ScheduleRequest)
+            .options(
+                selectinload(ScheduleRequest.requested_by),
+                selectinload(ScheduleRequest.recipient),
+            )
+            .where(
+                ScheduleRequest.id == request_id,
+                ScheduleRequest.match_id == match_id,
+                ScheduleRequest.recipient_id == user_id,
+                ScheduleRequest.status == SCHEDULE_REQUEST_PENDING,
+            )
+        )
+        schedule_request = request_result.scalar_one_or_none()
 
         if not schedule_request:
             raise ValueError(
                 "Schedule request not found or no longer pending."
             )
-
-        match = schedule_request.match
 
         if match.status not in (
             MATCH_STATUS_AWAITING_SCHEDULE,
@@ -1009,16 +1233,15 @@ async def accept_schedule_request(
                 "This match is no longer available for scheduling."
             )
 
+        schedule_request.match = match
         match.scheduled_at = schedule_request.proposed_at
         match.status = MATCH_STATUS_SCHEDULED
-
         schedule_request.status = SCHEDULE_REQUEST_ACCEPTED
 
         await session.commit()
         await session.refresh(schedule_request)
 
         return schedule_request
-
 
 async def reject_schedule_request(
     request_id: int,
@@ -1029,29 +1252,49 @@ async def reject_schedule_request(
     """
 
     async with AsyncSessionLocal() as session:
-
-        result = await session.execute(
-            select(ScheduleRequest)
-            .options(
-                selectinload(ScheduleRequest.match),
-                selectinload(ScheduleRequest.requested_by),
-                selectinload(ScheduleRequest.recipient),
-            )
-            .where(
+        initial_result = await session.execute(
+            select(ScheduleRequest.match_id).where(
                 ScheduleRequest.id == request_id,
                 ScheduleRequest.recipient_id == user_id,
                 ScheduleRequest.status == SCHEDULE_REQUEST_PENDING,
             )
         )
+        match_id = initial_result.scalar_one_or_none()
 
-        schedule_request = result.scalar_one_or_none()
+        if match_id is None:
+            raise ValueError(
+                "Schedule request not found or no longer pending."
+            )
+
+        match_result = await session.execute(
+            select(Match)
+            .where(Match.id == match_id)
+            .with_for_update()
+        )
+        match = match_result.scalar_one_or_none()
+
+        if not match:
+            raise ValueError("Match not found.")
+
+        request_result = await session.execute(
+            select(ScheduleRequest)
+            .options(
+                selectinload(ScheduleRequest.requested_by),
+                selectinload(ScheduleRequest.recipient),
+            )
+            .where(
+                ScheduleRequest.id == request_id,
+                ScheduleRequest.match_id == match_id,
+                ScheduleRequest.recipient_id == user_id,
+                ScheduleRequest.status == SCHEDULE_REQUEST_PENDING,
+            )
+        )
+        schedule_request = request_result.scalar_one_or_none()
 
         if not schedule_request:
             raise ValueError(
                 "Schedule request not found or no longer pending."
             )
-
-        match = schedule_request.match
 
         if match.status not in (
             MATCH_STATUS_AWAITING_SCHEDULE,
@@ -1061,6 +1304,7 @@ async def reject_schedule_request(
                 "This match is no longer available for scheduling."
             )
 
+        schedule_request.match = match
         schedule_request.status = SCHEDULE_REQUEST_REJECTED
 
         await session.commit()

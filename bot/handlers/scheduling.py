@@ -522,15 +522,8 @@ async def accept_schedule_handler(
     # RECIPIENT CONFIRMATION
     # ========================================================
 
-    if was_schedule_change:
-        recipient_text = schedule_change_accepted_message(
-            scheduled_at=scheduled_at,
-        )
-    else:
-        recipient_text = schedule_accepted_confirmation_message(
-            requester=requester,
-            scheduled_at=scheduled_at,
-        )
+    # Both players receive the same scheduling confirmation.
+    recipient_text = requester_text
 
     await callback.message.edit_text(
         recipient_text,

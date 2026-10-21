@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+from bot.ui.components.formatting import format_match_datetime
+
 
 def my_matches_message(
     upcoming_count: int,
@@ -89,7 +91,7 @@ def format_upcoming_match_summary(
     if match.scheduled_at:
         summary += (
             "\n"
-            f"{match.scheduled_at.strftime('%B %-d, %Y at %H:%M')}"
+            f"{format_match_datetime(match.scheduled_at, '%B %-d, %Y at %H:%M')}"
         )
     else:
         summary += "\nTime not scheduled"
@@ -126,7 +128,7 @@ def format_match_summary(
     if match.played_at:
         summary += (
             "\n"
-            f"{match.played_at.strftime('%B %-d, %Y at %H:%M')}"
+            f"{format_match_datetime(match.played_at, '%B %-d, %Y at %H:%M')}"
         )
 
     scores = []
@@ -294,8 +296,8 @@ def format_needs_action_schedule_proposal(
         f"#{match.id}  {current_user_name} vs {opponent_name}\n\n"
         f"{_competition_type(match)}\n"
         f"Schedule proposal · "
-        f"{schedule_request.proposed_at:%b %-d} · "
-        f"{schedule_request.proposed_at:%H:%M}"
+        f"{format_match_datetime(schedule_request.proposed_at, '%b %-d')} · "
+        f"{format_match_datetime(schedule_request.proposed_at, '%H:%M')}"
     )
 
 
@@ -313,7 +315,27 @@ def format_needs_action_result(
     return (
         f"#{match.id}  {current_user_name} vs {opponent_name}\n\n"
         f"{_competition_type(match)}\n"
-        "Result · Submit"
+        "Result: Submit"
+    )
+
+
+def format_needs_action_not_played(
+    match,
+    user_id: int,
+) -> str:
+    """Format a pending not-played request for either player."""
+
+    current_user_name, opponent_name = _match_names(match, user_id)
+
+    if match.not_played_requested_by_id == user_id:
+        status = "Match wasn't played · Waiting for opponent"
+    else:
+        status = "Opponent says the match wasn't played · Your response needed"
+
+    return (
+        f"#{match.id}  {current_user_name} vs {opponent_name}\n\n"
+        f"{_competition_type(match)}\n"
+        f"{status}"
     )
 
 
@@ -372,7 +394,7 @@ def format_needs_action_confirmation(
     return (
         f"#{match.id}  {current_user_name} vs {opponent_name}\n\n"
         f"{_competition_type(match)}\n"
-        f"Result submitted · {score_text}"
+        f"Result submitted: {score_text}"
     )
 
 
@@ -412,9 +434,9 @@ def format_upcoming_match_detail(
     if match.scheduled_at:
         sections.append(
             (
-                f"{match.scheduled_at:%B %-d, %Y}"
+                f"{format_match_datetime(match.scheduled_at, '%B %-d, %Y')}"
                 f" · "
-                f"{match.scheduled_at:%H:%M}"
+                f"{format_match_datetime(match.scheduled_at, '%H:%M')}"
             )
         )
     else:
@@ -478,9 +500,9 @@ def format_match_message(
             [
                 "",
                 (
-                    f"{match.scheduled_at:%B %-d, %Y}"
+                    f"{format_match_datetime(match.scheduled_at, '%B %-d, %Y')}"
                     f" · "
-                    f"{match.scheduled_at:%H:%M}"
+                    f"{format_match_datetime(match.scheduled_at, '%H:%M')}"
                 ),
             ]
         )
@@ -652,11 +674,203 @@ def format_cancelled_matches_message(
 
         if match.scheduled_at:
             message_parts.append(
-                match.scheduled_at.strftime(
-                    "%B %-d, %Y at %H:%M"
+                format_match_datetime(
+                    match.scheduled_at,
+                    "%B %-d, %Y at %H:%M",
                 )
             )
 
         message_parts.append("")
 
     return "\n".join(message_parts).rstrip()
+
+
+def confirmed_result_message(
+    match,
+    winner,
+    loser,
+) -> str:
+    lines = [
+        "Final Result",
+        "",
+        f"Match #{match.id}",
+        "",
+        (
+            f"Set 1    "
+            f"{match.set_1_player_one_score}–"
+            f"{match.set_1_player_two_score}"
+        ),
+        (
+            f"Set 2    "
+            f"{match.set_2_player_one_score}–"
+            f"{match.set_2_player_two_score}"
+        ),
+    ]
+
+    if (
+        match.set_3_player_one_score is not None
+        and match.set_3_player_two_score is not None
+    ):
+        lines.append(
+            (
+                f"Set 3    "
+                f"{match.set_3_player_one_score}–"
+                f"{match.set_3_player_two_score}"
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "Winner",
+            f"{winner.first_name} {winner.last_name}",
+            "",
+            "Loser",
+            f"{loser.first_name} {loser.last_name}",
+            "",
+            "Match completed.",
+        ]
+    )
+
+    return "\n".join(lines)
+
+
+def invalid_match_result_message(error: str) -> str:
+    return (
+        "Invalid match result.\n\n"
+        f"{error}\n\n"
+        "Please enter Set 2 again.\n"
+        "Example: 3:6"
+    )
+
+
+def invalid_set_score_message(error: str) -> str:
+    return (
+        "Invalid tennis set score.\n\n"
+        f"{error}\n\n"
+        "Example: 6:4"
+    )
+
+
+def result_session_expired_message() -> str:
+    return (
+        "Your result session has expired.\n\n"
+        "Please start again from My Matches."
+    )
+
+
+def result_submission_message(
+    match,
+) -> str:
+    player_one_name = (
+        f"{match.player_one.first_name} "
+        f"{match.player_one.last_name}"
+    )
+
+    player_two_name = (
+        f"{match.player_two.first_name} "
+        f"{match.player_two.last_name}"
+    )
+
+    return (
+        "🎾 Submit Result\n\n"
+        f"Match #{match.id}\n\n"
+        f"{player_one_name}\n"
+        "vs\n"
+        f"{player_two_name}\n\n"
+        "Set 1\n\n"
+        "Enter the score.\n"
+        "Example: 6:4"
+    )
+
+
+def score_format_error_message() -> str:
+    return (
+        "Invalid score format.\n\n"
+        "Please enter the score as 6:4."
+    )
+
+
+def score_parse_error_message(error: str) -> str:
+    return (
+        f"{error}\n\n"
+        "Example: 6:4"
+    )
+
+
+def set_2_submission_message(
+    player_one_score: int,
+    player_two_score: int,
+) -> str:
+    return (
+        "🎾 Submit Result\n\n"
+        f"Set 1    {player_one_score}–{player_two_score} ✓\n\n"
+        "Set 2\n\n"
+        "Enter the score.\n"
+        "Example: 3:6"
+    )
+
+
+def set_3_submission_message(
+    set_1_player_one_score: int,
+    set_1_player_two_score: int,
+    set_2_player_one_score: int,
+    set_2_player_two_score: int,
+) -> str:
+    return (
+        "🎾 Submit Result\n\n"
+        f"Set 1    {set_1_player_one_score}–{set_1_player_two_score} ✓\n"
+        f"Set 2    {set_2_player_one_score}–{set_2_player_two_score} ✓\n\n"
+        "Match tied · 1–1\n\n"
+        "Set 3\n\n"
+        "Enter the score.\n"
+        "Example: 6:2"
+    )
+
+
+def submitted_result_message(
+    match_id: int,
+    set_1_player_one_score: int,
+    set_1_player_two_score: int,
+    set_2_player_one_score: int,
+    set_2_player_two_score: int,
+    set_3_player_one_score: int | None = None,
+    set_3_player_two_score: int | None = None,
+) -> str:
+    lines = [
+        "✓ Result Submitted",
+        "",
+        f"Match #{match_id}",
+        "",
+        (
+            f"Set 1    "
+            f"{set_1_player_one_score}–"
+            f"{set_1_player_two_score}"
+        ),
+        (
+            f"Set 2    "
+            f"{set_2_player_one_score}–"
+            f"{set_2_player_two_score}"
+        ),
+    ]
+
+    if (
+        set_3_player_one_score is not None
+        and set_3_player_two_score is not None
+    ):
+        lines.append(
+            (
+                f"Set 3    "
+                f"{set_3_player_one_score}–"
+                f"{set_3_player_two_score}"
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "Waiting for your opponent to confirm.",
+        ]
+    )
+
+    return "\n".join(lines)

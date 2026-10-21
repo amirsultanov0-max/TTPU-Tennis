@@ -1,4 +1,6 @@
 import os
+import ssl
+from pathlib import Path
 
 from dotenv import load_dotenv
 from sqlalchemy import text
@@ -27,9 +29,14 @@ DATABASE_URL = DATABASE_URL.replace(
 )
 
 
+CA_CERT_PATH = Path(__file__).resolve().parent.parent / "certs" / "prod-ca-2021.crt"
+
+ssl_context = ssl.create_default_context(cafile=str(CA_CERT_PATH))
+
 engine = create_async_engine(
     DATABASE_URL,
-    pool_pre_ping=False,
+    pool_pre_ping=True,
+    connect_args={"ssl": ssl_context},
 )
 
 
