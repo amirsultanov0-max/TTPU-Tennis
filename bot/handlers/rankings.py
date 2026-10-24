@@ -5,8 +5,7 @@ from bot.keyboards.rankings import get_rankings_keyboard
 from bot.ui.components.buttons import MAIN_MENU_RANKINGS
 from bot.ui.messages.rankings import rankings_message
 from services.ranking import (
-    get_rankings,
-    get_total_players,
+    get_rankings_with_total,
 )
 
 
@@ -18,11 +17,7 @@ async def build_rankings_text() -> str:
     Build the rankings message.
     """
 
-    players = await get_rankings(
-        limit=10
-    )
-
-    total_players = await get_total_players()
+    players, total_players = await get_rankings_with_total(limit=10)
 
     return rankings_message(
         players,

@@ -92,3 +92,35 @@ async def get_player_rank(user_id: int) -> tuple[int, int]:
             return 0, int(total_result.scalar_one())
 
     return int(player_rank.rank), int(player_rank.total_players)
+
+
+async def get_rankings_with_total(
+    limit: int = 10,
+) -> tuple[list[User], int]:
+    """Fetch the top players and total count in one database query."""
+
+    total_count = (
+        select(func.count())
+        .select_from(User)
+        .scalar_subquery()
+    )
+
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(User, total_count.label("total_players"))
+            .order_by(
+                User.ranking_points.desc(),
+                User.wins.desc(),
+                User.first_name.asc(),
+                User.last_name.asc(),
+            )
+            .limit(limit)
+        )
+
+        rows = result.all()
+        if not rows:
+            return [], int(await session.scalar(
+                select(func.count()).select_from(User)
+            ))
+
+        return [row[0] for row in rows], int(rows[0][1])
