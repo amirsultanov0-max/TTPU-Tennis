@@ -1208,6 +1208,7 @@ async def accept_schedule_request(
         request_result = await session.execute(
             select(ScheduleRequest)
             .options(
+                selectinload(ScheduleRequest.match),
                 selectinload(ScheduleRequest.requested_by),
                 selectinload(ScheduleRequest.recipient),
             )
@@ -1239,7 +1240,6 @@ async def accept_schedule_request(
         schedule_request.status = SCHEDULE_REQUEST_ACCEPTED
 
         await session.commit()
-        await session.refresh(schedule_request)
 
         return schedule_request
 
